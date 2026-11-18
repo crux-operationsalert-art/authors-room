@@ -6,7 +6,8 @@
 --   * an author_approved block cannot change without a matching author approval
 --   * every book-scoped row is protected by row-level security
 
-create extension if not exists pgcrypto;
+create schema if not exists extensions;
+create extension if not exists pgcrypto with schema extensions;
 create schema if not exists app;
 
 -- ---------------------------------------------------------------- identity

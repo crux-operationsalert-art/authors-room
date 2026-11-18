@@ -1,12 +1,13 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { supabaseBrowser } from '@/lib/supabaseBrowser';
+import { Header } from '../ui';
 
 type KeyRow = {
   key_id: string; label: string; key_masked: string; status: string; project_label: string;
   teams: string; roles: string; current_activity: string | null; requests_today: number;
   tokens_today: number; rate_limited_today: number; errors_today: number; cost_today_usd: number;
-  last_used_at: string | null;
+  last_used_at: string | null; notes: string | null;
 };
 type TeamRow = {
   team_code: string; team: string; description: string; key_label: string | null; key_masked: string | null;
@@ -65,15 +66,17 @@ export default function KeysPage() {
   }
   async function addKey(e: React.FormEvent) {
     e.preventDefault();
-    const { data: s } = await sb.auth.getSession();
-    const res = await fetch('/api/keys', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${s.session?.access_token ?? ''}` },
-      body: JSON.stringify({ secret: newKey, team: newTeam || null }),
-    });
-    const j = await res.json();
+    const { data: j, error } = await sb.functions.invoke('worker', { body: { action: 'add_key', secret: newKey, team: newTeam || null } });
     setNewKey('');
-    setMsg(res.ok ? `Added ${j.label} (••••${j.last4})${j.team ? ` for ${j.team}` : ' as standby'}.` : j.error);
+    setMsg(error ? error.message : j.error ? j.error : `Added ${j.label} (••••${j.last4})${j.team ? ` for ${j.team}` : ' as standby'}.`);
+    load();
+  }
+  async function checkKeys() {
+    setMsg('Checking every key with Google…');
+    const { data: j, error } = await sb.functions.invoke('worker', { body: { action: 'check_keys' } });
+    if (error) { setMsg(error.message); return; }
+    const bad = (j.keys ?? []).filter((k: any) => !k.ok);
+    setMsg(bad.length ? `Problem keys: ${bad.map((k: any) => `${k.label} (${k.error ?? k.note})`).join(', ')}` : `All ${j.keys.length} keys are valid.`);
     load();
   }
 
@@ -84,6 +87,7 @@ export default function KeysPage() {
 
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 1200, margin: '24px auto', padding: '0 16px', color: '#1f2328' }}>
+      <Header><button onClick={checkKeys}>Check all keys</button></Header>
       <h1 style={{ marginBottom: 4 }}>AI keys, teams and quota</h1>
       <p style={{ marginTop: 0, color: '#59636e' }}>
         Quota belongs to the Gemini <b>project</b>, so every key below draws on the same limits. Keys give each team its own
@@ -137,13 +141,14 @@ export default function KeysPage() {
 
       <h2>Keys — what each one is doing</h2>
       <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-        <thead><tr>{['Key', 'Status', 'Team(s)', 'Doing now', 'Requests', 'Tokens', '429s', 'Errors', 'Cost (USD)', 'Last used (IST)', ''].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
+        <thead><tr>{['Key', 'Status', 'Team(s)', 'Doing now', 'Last check', 'Requests', 'Tokens', '429s', 'Errors', 'Cost (USD)', 'Last used (IST)', ''].map(h => <th key={h} style={th}>{h}</th>)}</tr></thead>
         <tbody>{keys.map(k => (
           <tr key={k.key_id} style={{ opacity: k.status === 'active' ? 1 : 0.55 }}>
             <td style={td}><b>{k.label}</b> {k.key_masked}</td>
             <td style={td}>{k.status}</td>
             <td style={td} title={k.roles}>{k.teams}</td>
             <td style={td}>{k.current_activity ?? 'Idle'}</td>
+            <td style={td}><small>{k.notes ?? '—'}</small></td>
             <td style={td}>{fmt(k.requests_today)}</td>
             <td style={td}>{fmt(k.tokens_today)}</td>
             <td style={td}>{fmt(k.rate_limited_today)}</td>

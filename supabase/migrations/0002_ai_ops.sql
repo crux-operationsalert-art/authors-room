@@ -178,7 +178,7 @@ begin
   if v_project is null then
     raise exception 'create the active Gemini project first (app.admin_set_project)';
   end if;
-  v_fp := encode(digest(p_secret, 'sha256'), 'hex');
+  v_fp := encode(extensions.digest(p_secret, 'sha256'), 'hex');
   if exists (select 1 from public.ai_keys where key_fingerprint = v_fp) then
     raise exception 'this key is already registered';
   end if;
@@ -299,6 +299,30 @@ begin
    where id = p_job;
 end $$;
 
+-- Project-wide pre-check shared by every worker invocation (stateless workers).
+-- Returns 0 when a call may go now, else seconds to wait. Counts ALL keys.
+create or replace function app.quota_gate(p_model text, p_est_tokens int default 0)
+returns int language plpgsql stable security definer set search_path = public as $$
+declare l public.project_model_limits%rowtype; v_day int; v_min int; v_tok int; v_limited int;
+begin
+  select pml.* into l from public.project_model_limits pml
+    join public.ai_projects p on p.id = pml.project_id and p.is_active
+   where pml.model_id = p_model;
+  select count(*) filter (where status <> 'rate_limited' and created_at >= app.pacific_day_start()),
+         count(*) filter (where status <> 'rate_limited' and created_at >= now() - interval '1 minute'),
+         coalesce(sum(input_tokens) filter (where created_at >= now() - interval '1 minute'), 0),
+         count(*) filter (where status = 'rate_limited' and created_at >= now() - interval '1 minute')
+    into v_day, v_min, v_tok, v_limited
+    from public.agent_runs where model_id = p_model;
+  if l.rpd is not null and v_day >= l.rpd then
+    return greatest(1, extract(epoch from (app.pacific_day_start() + interval '1 day' - now()))::int);
+  end if;
+  if v_limited > 0 then return 60; end if;                       -- provider said no in the last minute
+  if l.rpm is not null and v_min >= l.rpm then return 60; end if;
+  if l.tpm is not null and v_tok > 0 and v_tok + p_est_tokens > l.tpm then return 60; end if;
+  return 0;
+end $$;
+
 create or replace function app.cost_today_usd() returns numeric
 language sql stable security definer set search_path = public as $$
   select coalesce(sum(cost_estimate), 0) from public.agent_runs where created_at >= app.pacific_day_start()
@@ -403,7 +427,7 @@ create policy runs_read    on public.agent_runs           for select to authenti
 
 grant select on public.v_key_status, public.v_project_quota, public.v_team_usage to authenticated;
 
-revoke all on function app.admin_add_ai_key(text,text,text,text) from public;
+revoke all on function app.admin_add_ai_key(text,text,text,text) from public, anon, authenticated;
 revoke all on function app.admin_set_project(text,text,text)     from public;
 revoke all on function app.get_key_secret(uuid)                   from public;
 revoke all on function app.claim_next_job(text)                   from public;
@@ -412,6 +436,8 @@ revoke all on function app.fail_job(uuid,text,int,boolean)        from public;
 revoke all on function app.set_job_key(uuid,uuid)                 from public;
 revoke all on function app.resolve_key_for_team(text)             from public;
 revoke all on function app.cost_today_usd()                       from public;
+revoke all on function app.quota_gate(text,int)                   from public;
+grant execute on function app.quota_gate(text,int) to service_role;
 grant execute on function app.cost_today_usd() to service_role, authenticated;
 grant execute on function app.admin_add_ai_key(text,text,text,text), app.admin_set_project(text,text,text),
   app.get_key_secret(uuid), app.claim_next_job(text), app.complete_job(uuid,jsonb),

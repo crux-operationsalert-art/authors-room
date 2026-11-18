@@ -73,6 +73,13 @@ do $$ begin
   raise notice 'T6 pass: key, team and project-quota views';
 end $$;
 
+-- T8: quota gate is project-wide (RPD 5 reached by K01+K03 plus a recent 429)
+do $$ begin
+  if app.quota_gate('test-flash') = 0 then raise exception 'T8 fail: gate open after 429'; end if;
+  if app.quota_gate('other-model') <> 0 then raise exception 'T8 fail: unrelated model blocked'; end if;
+  raise notice 'T8 pass: project-wide quota gate';
+end $$;
+
 -- T7: authenticated non-author sees no keys
 set local request.jwt.claim.sub = '99999999-9999-9999-9999-999999999999';
 set local role authenticated;

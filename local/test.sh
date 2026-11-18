@@ -13,7 +13,8 @@ $P -d t -f "$ROOT/local/supabase_stubs.sql"
 for f in "$ROOT"/supabase/migrations/*.sql; do
   if grep -q 'extension if not exists vector' "$f" && [ ! -f /usr/share/postgresql/16/extension/vector.control ]; then
     echo "skip $(basename "$f") (pgvector not installed locally)"; continue; fi
-  $P -d t -f "$f"; echo "applied $(basename "$f")"
+  # pg_net / pg_cron exist only on Supabase; strip them for the local run
+  sed '/extension if not exists pg_net/d; /extension if not exists pg_cron/d' "$f" | $P -d t; echo "applied $(basename "$f")"
 done
 $P -d t -c 'grant select, insert, update, delete on all tables in schema public to authenticated, service_role'
 for f in "$ROOT"/supabase/tests/*.sql; do echo "== $(basename "$f")"; $P -d t -f "$f" 2>&1 | sed 's/^psql:.*NOTICE:  /  /'; done
