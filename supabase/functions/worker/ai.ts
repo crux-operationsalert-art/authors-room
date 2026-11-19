@@ -149,6 +149,8 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
         quotaWait = quotaWait ? Math.min(quotaWait, wait) : wait;
         continue;
       }
+      // Last model used up, but an earlier one was only busy (timeout/5xx): that one still has allowance today.
+      if (isDailyLimit(msg) && busyElsewhere) throw new QuotaExhaustedError(`Backup models busy; ${m.id} used up for today. Trying again in 2 minutes`, 120);
       throw new QuotaExhaustedError(`Gemini ${isDailyLimit(msg) ? 'daily free limit' : 'per-minute limit'} reached for ${m.id}`, Math.min(quotaWait ? Math.min(quotaWait, wait) : wait, 86400));
     }
     await record({ model_id: m.id, latency_ms, status: 'error', http_status: status || null, error: msg });
