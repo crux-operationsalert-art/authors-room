@@ -24,6 +24,7 @@ const doing = (j: Job) => {
     case 'genre/directions': return `${who} is preparing three possible directions for your book`;
     case 'constitution/draft': return `${who} is drafting the book's constitution (its fixed rules)`;
     case 'bible/seed': return `${who} is building the Book Bible: characters, places and facts`;
+    case 'outline/plan': return `${who} is planning the chapters and their lengths`;
     case 'paragraph/draft': return `${who} is writing the next paragraph`;
     case 'paragraph/revise': return `${who} is revising the paragraph after review (round ${loop})`;
     case 'paragraph/review': return `${who} is reviewing the new paragraph`;
@@ -32,7 +33,7 @@ const doing = (j: Job) => {
     default: return `${who}: ${j.step.replace(/_/g, ' ')}`;
   }
 };
-const TYPICAL: Record<string, string> = { interview: '30–60 s', directions: '40–80 s', draft: '30–90 s', seed: '40–90 s',
+const TYPICAL: Record<string, string> = { interview: '30–60 s', directions: '40–80 s', draft: '30–90 s', seed: '40–90 s', plan: '40–90 s',
   revise: '30–90 s', review: '20–60 s', consolidate: '20–60 s', extract_facts: '10–30 s' };
 
 const finished = (j: Job) => {
@@ -43,6 +44,7 @@ const finished = (j: Job) => {
     case 'genre/directions': return `Genre Strategist proposed ${r.directions ?? 3} directions`;
     case 'constitution/draft': return 'Chief Editor drafted the constitution for your approval';
     case 'bible/seed': return `Story Architect built the Book Bible: ${r.entities ?? '?'} entries, ${r.facts ?? '?'} facts`;
+    case 'outline/plan': return `Story Architect planned ${r.chapters ?? '?'} chapters (~${Number(r.words ?? 0).toLocaleString('en-IN')} words)`;
     case 'paragraph/draft': return `Lead Writer wrote a paragraph (${r.chars ?? '?'} characters)`;
     case 'paragraph/revise': return `Lead Writer revised the paragraph (${r.chars ?? '?'} characters)`;
     case 'paragraph/review': return `${ROLE_NAME[j.role_code]} scored it ${r.score ?? '?'}/100 with ${r.issues ?? 0} note${r.issues === 1 ? '' : 's'}`;

@@ -181,12 +181,56 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     return { entities: o.entities?.length ?? 0, facts: o.facts?.length ?? 0 };
   }
 
+  if (key === 'outline/plan') {
+    const ctx = await bookContext(db, job.book_id);
+    const prev = await manuscriptSoFar(db, job.book_id);
+    const r = await generate(db, { ...base, system: R.outline.system, jsonSchema: R.outline.schema, maxOutputTokens: 8000,
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nBRIEF:\n${JSON.stringify(ctx.cons!.brief, null, 1)}\n\n` +
+              `BOOK BIBLE:\n${ctx.ents.map((e: any) => `- ${e.type} ${e.name}: ${e.profile?.summary ?? ''}`).join('\n')}\n\n` +
+              `ALREADY WRITTEN (${prev.length} paragraphs):\n${prev.slice(0, 6).join('\n\n') || '(nothing yet)'}` });
+    const o = parse(r.text);
+    const chs = (o.chapters ?? []).filter((c: any) => c?.title);
+    if (!chs.length) throw new Error('The chapter plan came back empty.');
+    const { data: existing } = await db.from('outline_units').select('id').eq('book_id', job.book_id).eq('level', 'chapter').order('order_key');
+    let total = 0;
+    for (let i = 0; i < chs.length; i++) {
+      const c = chs[i];
+      const row = { title: String(c.title), purpose: c.purpose ?? null, beats: (c.beats ?? []).map(String),
+                    target_words: Math.max(400, Math.round(Number(c.target_words) || 3000)) };
+      total += row.target_words;
+      if (i === 0 && existing?.[0]) await db.from('outline_units').update(row).eq('id', existing[0].id);
+      else await db.from('outline_units').insert({ book_id: job.book_id, level: 'chapter', status: 'planned',
+                                                    order_key: `a${String(i).padStart(2, '0')}`, ...row });
+    }
+    await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant',
+      content: `${o.message}\n\nChapter plan (${chs.length} chapters, about ${total.toLocaleString('en-IN')} words):\n` +
+               chs.map((c: any, i: number) => `${i + 1}. ${c.title} (~${Math.round(Number(c.target_words) || 0).toLocaleString('en-IN')} words)`).join('\n') });
+    return { chapters: chs.length, words: total };
+  }
+
   if (key === 'paragraph/draft' || key === 'paragraph/revise') {
     const blockId = job.payload.block_id, loop = Number(job.payload.loop ?? 0);
     const ctx = await bookContext(db, job.book_id);
     const prev = await manuscriptSoFar(db, job.book_id, blockId);
-    const { data: blk } = await db.from('manuscript_blocks').select('id, current_version_id, block_versions!manuscript_blocks_current_fk(text)').eq('id', blockId).single();
+    const { data: blk } = await db.from('manuscript_blocks').select('id, unit_id, current_version_id, block_versions!manuscript_blocks_current_fk(text)').eq('id', blockId).single();
     const current = (blk as any)?.block_versions?.text;
+    // chapter context: which chapter this paragraph belongs to, its plan and how far along it is
+    let chapterText = '';
+    if ((blk as any)?.unit_id) {
+      const { data: chId } = await app.rpc('chapter_of', { p_unit: (blk as any).unit_id });
+      const { data: chs } = await db.from('outline_units').select('id, title, purpose, beats, target_words').eq('book_id', job.book_id).eq('level', 'chapter').order('order_key');
+      const idx = (chs ?? []).findIndex((c: any) => c.id === chId);
+      if (idx >= 0) {
+        const ch = (chs as any[])[idx];
+        const { data: sofar } = await app.rpc('chapter_words', { p_chapter: ch.id, p_approved_only: true });
+        const words = Number(sofar ?? 0), target = Number(ch.target_words ?? 0);
+        chapterText = `CHAPTER PLAN:\n${(chs as any[]).map((c, i) => `${i + 1}. ${c.title}${i === idx ? '   <== CURRENT' : ''}`).join('\n')}\n\n` +
+          `CURRENT CHAPTER ${idx + 1}: ${ch.title}\nPurpose: ${ch.purpose ?? ''}\nBeats: ${(ch.beats ?? []).join(' | ')}\n` +
+          (target ? `Written so far in this chapter: ${words} of about ${target} words.\n` : '') +
+          (words === 0 ? `This paragraph OPENS chapter ${idx + 1}.\n` : '') +
+          (target && target - words < 200 ? 'This is the last paragraph of the chapter: bring it to a satisfying close.\n' : '') + '\n';
+      }
+    }
     let task = prev.length ? 'Write the next paragraph.' : 'Write the opening paragraph of the book.';
     if (job.payload.guidance) task += `\nAuthor's guidance: ${job.payload.guidance}`;
     if (key === 'paragraph/revise') task = `Revise this paragraph:\n"""${current}"""\n\nInstructions: ${job.payload.instructions ?? ''}${job.payload.author_note ? `\nAuthor's note (highest priority): ${job.payload.author_note}` : ''}\nKeep what works. Output only the revised paragraph.`;
@@ -194,6 +238,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\nAvoid: ${(ctx.voice?.banned_phrases ?? []).join('; ')}\n\n` +
               `BOOK BIBLE:\n${ctx.ents.map((e: any) => `- ${e.type} ${e.name}: ${e.profile?.summary ?? ''}`).join('\n')}\n\n` +
               `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` +
+              chapterText +
               `MANUSCRIPT SO FAR (${prev.length} paragraphs, last 8 shown):\n${prev.slice(-8).join('\n\n') || '(none yet)'}\n\nTASK:\n${task}` });
     const text = r.text.trim().replace(/^["“]|["”]$/g, '');
     const { data: vid, error } = await app.rpc('commit_block_version', { p_block_id: blockId, p_text: text,

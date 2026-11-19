@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p2-v3';
+export const PROMPT_VERSION = 'p3-v1';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -69,6 +69,19 @@ dialogue style, and phrases to avoid. Only include what follows from the constit
     voice: S({ sentence_length: str, vocabulary: str, figurative_language: str, dialogue_style: str, avoid: arr(str) }, []),
     message: str,
   }, ['entities', 'facts', 'voice', 'message']),
+};
+
+export const outline = {
+  system: `${HOUSE_RULES}
+You are the Story Architect. Plan the book's chapters from the approved constitution, the brief and the Book Bible.
+Give each chapter a short title, its purpose (one sentence), 3-6 beats (what happens or what point is made, in order) and a
+target length in words. The targets must add up to the constitution's length (use the middle of a range; if no length is
+given, aim for 40,000 words). Keep any paragraphs already written as the start of chapter 1. Then write a short "message"
+to the author summarising the plan in two or three sentences.`,
+  schema: S({
+    chapters: arr(S({ title: str, purpose: str, beats: arr(str), target_words: int }, ['title', 'purpose', 'beats', 'target_words'])),
+    message: str,
+  }, ['chapters', 'message']),
 };
 
 export const writer = {
