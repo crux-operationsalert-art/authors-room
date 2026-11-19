@@ -301,9 +301,9 @@ function Workspace() {
                 {ch!.target_words ? <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}> · {wordsIn(ch!.id).toLocaleString('en-IN')} / {ch!.target_words.toLocaleString('en-IN')} words</span> : null}</h3>}
               <div id={`act-block-${b.id}`} style={card}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-                  <b style={{ fontSize: 13 }}>¶ {n + 1}</b><Status s={b.status} />
+                  <b style={{ fontSize: 13 }}>¶ {n + 1}</b>{flag?.via === 'autopilot' && b.status === 'author_approved' ? null : <Status s={b.status} />}
                   {v && <span style={{ fontSize: 12, color: C.muted }}>v{v.version_no} · {v.provenance.replace('_', ' ')}</span>}
-                  {flag?.via === 'autopilot' && <span style={{ fontSize: 12, color: flag.note ? C.warn : C.ok }}>{flag.note ? '⚑ autopilot · review later' : 'approved by autopilot'}</span>}
+                  {flag?.via === 'autopilot' && <span style={{ fontSize: 12, color: flag.note ? C.warn : C.ok }}>{flag.note ? '⚑ Approved by autopilot · review later' : '✓ Approved by autopilot'}</span>}
                   {avg !== null && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>Review score {avg}/100</span>}
                 </div>
                 {flag?.note && <p style={{ fontSize: 13, color: C.warn, margin: '0 0 6px' }}>{flag.note}</p>}
