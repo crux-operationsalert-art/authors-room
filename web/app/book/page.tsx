@@ -3,6 +3,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { app, kick, supabaseBrowser } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page, Status } from '../ui';
+import { ActivityPanel, NextStep } from '../activity';
 
 type Msg = { id: string; role: string; content: string; created_at: string };
 type Decision = { id: string; type: string; subject_ref: string | null; question: string; options: any[]; recommendation: string | null; status: string };
@@ -28,6 +29,8 @@ function Workspace() {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [jobs, setJobs] = useState<any[]>([]);
+  const [allJobs, setAllJobs] = useState<any[]>([]);
+  const [runs, setRuns] = useState<any[]>([]);
   const [text, setText] = useState('');
   const [guidance, setGuidance] = useState('');
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -36,7 +39,7 @@ function Workspace() {
 
   const load = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const [b, m, d, c, e, bl, is, rv, j] = await Promise.all([
+    const [b, m, d, c, e, bl, is, rv, j, aj, ar] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
       sb.from('decisions').select('*').eq('book_id', id).eq('status', 'pending').order('created_at'),
@@ -46,10 +49,15 @@ function Workspace() {
       sb.from('editorial_issues').select('*').eq('book_id', id).order('created_at'),
       sb.from('review_runs').select('block_version_id, role_code, score, summary').eq('book_id', id),
       sb.from('agent_jobs').select('workflow, step, role_code, status, last_error').eq('book_id', id).in('status', ['queued', 'running', 'waiting_quota', 'failed']),
+      sb.from('agent_jobs').select('id, workflow, step, role_code, status, attempts, payload, result, last_error, created_at, updated_at, locked_at, run_after')
+        .eq('book_id', id).order('updated_at', { ascending: false }).limit(40),
+      sb.from('agent_runs').select('job_id, role_code, model_id, input_tokens, output_tokens, latency_ms, status, created_at')
+        .eq('book_id', id).order('created_at', { ascending: false }).limit(300),
     ]);
     setBook(b.data); setMsgs((m.data ?? []) as Msg[]); setDecisions((d.data ?? []) as Decision[]); setCons(c.data);
     setEnts(e.data ?? []); setBlocks((bl.data ?? []) as any); setIssues((is.data ?? []) as Issue[]);
     setReviews((rv.data ?? []) as Review[]); setJobs(j.data ?? []);
+    setAllJobs(aj.data ?? []); setRuns(ar.data ?? []);
   }, [sb, id]);
 
   useEffect(() => {
@@ -59,12 +67,13 @@ function Workspace() {
       ch.on('postgres_changes', { event: '*', schema: 'public', table: t, filter: `book_id=eq.${id}` }, () => load());
     }
     ch.subscribe();
-    const poll = setInterval(load, 20_000);   // safety net if realtime drops
+    const poll = setInterval(load, 10_000);   // safety net if realtime drops
     const back = () => { setErr(null); load(); };
     window.addEventListener('online', back);
     return () => { sb.removeChannel(ch); clearInterval(poll); window.removeEventListener('online', back); };
   }, [sb, id, load]);
-  useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs.length]);
+  // scroll only inside the chat box, never the whole page (keeps Live activity in view on phones)
+  useEffect(() => { const box = chatEnd.current?.parentElement; if (box) box.scrollTop = box.scrollHeight; }, [msgs.length]);
 
   const OFFLINE_MSG = 'Could not reach the server. Check your internet and try again; nothing was lost.';
   const friendly = (m?: string) => (!m || /fetch|network|load failed|internet|ERR_/i.test(m)) ? OFFLINE_MSG : m;
@@ -109,23 +118,31 @@ function Workspace() {
   const genreDecision = decisions.find(d => d.type === 'genre_direction');
   const consolidations = decisions.filter(d => d.type === 'consolidation');
   const active = blocks.find(b => !['author_approved', 'cut'].includes(b.status));
+  const lastMsg = msgs.at(-1);
+  const paraNo = (bid: string) => blocks.findIndex(x => x.id === bid) + 1;
+  const next: NextStep = failed.length ? { who: 'you', text: 'a step could not finish. Press “Retry now” below.' }
+    : busy ? { who: 'team', text: 'the team is working. You can close this page; the work carries on in the cloud.' }
+    : book.status === 'intake' && !genreDecision ? (lastMsg?.role === 'author'
+        ? { who: 'team', text: 'your message is in the queue; the Interviewer starts within a minute.' }
+        : { who: 'you', text: 'answer the Interviewer’s question in the chat, or press “Enough questions — propose directions”.', target: 'act-chat' })
+    : genreDecision ? { who: 'you', text: 'pick one of the three directions for your book.', target: 'act-directions' }
+    : cons?.status === 'proposed' ? { who: 'you', text: 'read the book’s constitution and approve it (or reply in chat with changes).', target: 'act-constitution' }
+    : cons?.status === 'approved' && ents.length === 0 ? { who: 'team', text: 'the Story Architect will build the Book Bible next.' }
+    : active?.status === 'qc_passed' ? { who: 'you', text: `read paragraph ${paraNo(active.id)} and approve it, or ask for a revision.`, target: `act-block-${active.id}` }
+    : active ? { who: 'team', text: `paragraph ${paraNo(active.id)} is being written or reviewed.` }
+    : cons?.status === 'approved' ? { who: 'you', text: blocks.length ? 'ask for the next paragraph (you can add guidance first).' : 'the Book Bible is ready. Ask the Lead Writer for the opening paragraph.', target: 'act-write' }
+    : null;
+  const STAGE: Record<string, string> = { intake: 'Interview', planning: 'Planning — writing not started', writing: 'Writing', production: 'Production', released: 'Released' };
 
   return (
     <main style={page}>
-      <Header><span style={{ fontSize: 13, color: C.muted }}>{book.working_title} · {book.status}</span></Header>
+      <Header><span style={{ fontSize: 13, color: C.muted }}>{book.working_title} · {STAGE[book.status] ?? book.status}</span></Header>
       {err && <p role="alert" style={{ ...card, borderColor: C.bad, color: C.bad }}>{err}</p>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
         <button style={btn} onClick={downloadBackup}>Download backup (.json)</button>
         <button style={btn} onClick={downloadManuscript} disabled={!blocks.some(b => b.block_versions)}>Download manuscript (.md)</button>
       </div>
-      <p style={{ fontSize: 13, color: busy ? C.warn : C.muted, margin: '0 0 4px' }}>
-        {busy ? `The team is working (${activeJobs.length} task${activeJobs.length > 1 ? 's' : ''}${waiting ? `, ${waiting} waiting for quota` : ''})…` : 'The team is idle.'}
-      </p>
-      {busy && (
-        <ul style={{ fontSize: 13, color: C.muted, margin: '0 0 12px', paddingLeft: 18 }}>
-          {activeJobs.map((j, i) => <li key={i}>{({ chief_editor: 'Chief Editor', author_interviewer: 'Interviewer', genre_strategist: 'Genre Strategist', story_architect: 'Story Architect', lead_writer: 'Lead Writer', voice_custodian: 'Voice reviewer', continuity_manager: 'Continuity reviewer', logic_fact_checker: 'Logic & fact reviewer', line_copy_editor: 'Language reviewer', reader_panel_manager: 'Simulated reader' } as Record<string, string>)[j.role_code] ?? j.role_code}: {j.step.replace('_', ' ')} — {j.status === 'running' ? 'working now' : j.status === 'waiting_quota' ? 'waiting for Google’s quota to refill' : 'queued'}</li>)}
-        </ul>
-      )}
+      <ActivityPanel jobs={allJobs} runs={runs} next={next} />
       {failed.length > 0 && (
         <div style={{ ...card, borderColor: C.bad }}>
           <b style={{ color: C.bad }}>{failed.length} step{failed.length > 1 ? 's' : ''} could not finish</b>
@@ -137,7 +154,7 @@ function Workspace() {
       <div className="two-col wide">
         {/* ---------- left: conversation + decisions ---------- */}
         <section>
-          <div style={{ ...card, maxHeight: 460, overflowY: 'auto' }}>
+          <div id="act-chat" style={{ ...card, maxHeight: 460, overflowY: 'auto' }}>
             {msgs.map(m => (
               <div key={m.id} style={{ margin: '8px 0', textAlign: m.role === 'author' ? 'right' : 'left' }}>
                 <div style={{ display: 'inline-block', maxWidth: '88%', padding: '8px 10px', borderRadius: 8, whiteSpace: 'pre-wrap', fontSize: 14,
@@ -163,7 +180,7 @@ function Workspace() {
           )}
 
           {genreDecision && (
-            <div style={card}>
+            <div id="act-directions" style={card}>
               <h3 style={{ marginTop: 0 }}>{genreDecision.question}</h3>
               {genreDecision.options.map((o: any, i: number) => (
                 <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
@@ -180,7 +197,7 @@ function Workspace() {
           )}
 
           {cons && cons.status !== 'draft' && (
-            <div style={card}>
+            <div id="act-constitution" style={card}>
               <h3 style={{ marginTop: 0 }}>Book constitution {cons.status === 'approved' ? '✓ approved' : '— please review'}</h3>
               {[['Premise', cons.premise], ['Genre', `${cons.genre} / ${cons.subgenre}`], ['Audience', cons.audience],
                 ['Themes', (cons.themes ?? []).join(', ')], ['Point of view', `${cons.pov}; ${cons.tense}`], ['Voice', cons.voice],
@@ -206,7 +223,7 @@ function Workspace() {
         {/* ---------- right: manuscript ---------- */}
         <section>
           <h2 style={{ marginTop: 0 }}>Manuscript</h2>
-          {blocks.length === 0 && <p style={{ color: C.muted }}>No text yet. Approve the constitution, then ask for the opening paragraph.</p>}
+          {blocks.length === 0 && <p style={{ color: C.muted }}>No text yet. Once the constitution is approved and the Book Bible is ready, ask for the opening paragraph.</p>}
           {blocks.map((b, n) => {
             const v = b.block_versions;
             const its = issues.filter(i => i.block_version_id === b.current_version_id);
@@ -214,7 +231,7 @@ function Workspace() {
             const avg = rvs.length ? Math.round(rvs.reduce((s, r) => s + (r.score ?? 0), 0) / rvs.length) : null;
             const cdec = consolidations.find(d => d.subject_ref === b.id);
             return (
-              <div key={b.id} style={card}>
+              <div key={b.id} id={`act-block-${b.id}`} style={card}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
                   <b style={{ fontSize: 13 }}>¶ {n + 1}</b><Status s={b.status} />
                   {v && <span style={{ fontSize: 12, color: C.muted }}>v{v.version_no} · {v.provenance.replace('_', ' ')}</span>}
@@ -256,7 +273,7 @@ function Workspace() {
             );
           })}
           {cons?.status === 'approved' && !active && (
-            <div style={card}>
+            <div id="act-write" style={card}>
               <input style={input} placeholder="Optional guidance for the next paragraph" value={guidance} onChange={e => setGuidance(e.target.value)} aria-label="Guidance" />
               <button style={{ ...btnPrimary, marginTop: 8 }} disabled={ents.length === 0}
                       onClick={() => { run(app().rpc('request_next_paragraph', { p_book: id, p_guidance: guidance || null })); setGuidance(''); }}>
