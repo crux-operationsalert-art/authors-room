@@ -63,7 +63,12 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
 
   const est = Math.ceil((req.system.length + req.prompt.length) / 4);
   const { data: wait } = await app.rpc('quota_gate', { p_model: chain[0].id, p_est_tokens: est });
-  if (Number(wait) > 0) throw new QuotaExhaustedError(`Project quota for ${chain[0].id} is used up for now.`, Number(wait));
+  // Main model resting (its limit is used up): go straight to the backups instead of waiting, if there are any.
+  let startAt = 0;
+  if (Number(wait) > 0) {
+    if (chain.length < 2) throw new QuotaExhaustedError(`Project quota for ${chain[0].id} is used up for now.`, Number(wait));
+    startAt = 1;
+  }
 
   const promptHash = await sha256(req.system + '\u0000' + req.prompt);
   const base = { job_id: req.jobId ?? null, book_id: req.bookId ?? null, role_code: req.roleCode, team_code: req.teamCode,
@@ -83,10 +88,10 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
 
   const t_all = Date.now();
   let lastMsg = '';
-  let quotaWait = 0;   // set when a model's DAILY free limit is used up and we moved on to the next model
-  for (let mi = 0; mi < chain.length; mi++) {
+  let quotaWait = startAt ? Number(wait) : 0;   // set when a model's DAILY free limit is used up and we moved on
+  for (let mi = startAt; mi < chain.length; mi++) {
     const m = chain[mi];
-    if (mi > 0 && Date.now() - t_all > 60_000) break;          // stay inside the function's time limit
+    if (mi > startAt && Date.now() - t_all > 60_000) break;          // stay inside the function's time limit
     const t0 = Date.now();
     let status = 0, json: any = {}, retryAfter = 0;
     try {
