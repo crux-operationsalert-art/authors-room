@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p3-v1';
+export const PROMPT_VERSION = 'p4-v1';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -88,6 +88,8 @@ export const writer = {
   system: `${HOUSE_RULES}
 You are the Lead Writer, the only member of the team who writes manuscript text. Write exactly ONE paragraph that continues
 the manuscript. Follow the constitution, the voice profile and the canon facts exactly. Do not repeat earlier paragraphs.
+AUTHOR'S DIRECTIONS, when given, come first: follow them exactly (only the constitution's never-change list ranks higher).
+Pick up exactly where the paragraph before leaves off, and when the following paragraph is shown, lead into it naturally.
 Avoid generic phrasing and clichés. Output only the paragraph text, with no title, notes or quotation marks around it.`,
 };
 
@@ -96,7 +98,7 @@ export const reviewer = (role: string, focus: string) => ({
 You are the ${role} reviewing ONE new paragraph in the context of the book so far. Focus only on: ${focus}.
 Report concrete problems with quoted evidence and a specific fix. Severity: critical = breaks canon, constitution, facts or
 rights; major = clearly hurts the book; moderate = worth fixing; minor = polish. Do not invent problems: an empty issue list
-is a valid answer. Score 0-100 for your focus area.`,
+is a valid answer. Score 0-100 for your focus area. If the paragraph ignores an AUTHOR'S DIRECTION, report a major issue.`,
   schema: S({
     score: int, summary: str,
     issues: arr(S({ severity: { type: 'string', enum: ['critical','major','moderate','minor'] }, category: str,
@@ -126,4 +128,36 @@ export const facts = {
 You are the Continuity Manager. List the NEW atomic facts this paragraph establishes (names, ages, places, objects, events,
 relationships, who knows what). Only facts actually stated in the paragraph. Each one sentence.`,
   schema: S({ facts: arr(S({ entity: str, statement: str }, ['statement'])) }, ['facts']),
+};
+
+export const panel = {
+  system: `${HOUSE_RULES}
+You are a review panel of five independent specialists assessing ONE new paragraph in the context of the book.
+Each specialist works alone, only from their own focus, and does not repeat another specialist's points:
+${Object.entries(LAYER1).map(([code, r]) => `- ${code}: ${r.name}. Focus: ${r.focus}`).join('\n')}
+For each specialist: concrete problems with quoted evidence and a specific fix; severity critical = breaks canon, constitution,
+facts or rights; major = clearly hurts the book; moderate = worth fixing; minor = polish. Do not invent problems: an empty
+issue list is valid. Score 0-100 for that specialist's focus. If the paragraph ignores an AUTHOR'S DIRECTION, the most relevant
+specialist reports a major issue. If it does not follow on smoothly from the paragraph before (or lead into the one after,
+when shown), the continuity specialist reports it. Return exactly one review per specialist.`,
+  schema: S({
+    reviews: arr(S({ role: { type: 'string', enum: Object.keys(LAYER1) }, score: int, summary: str,
+      issues: arr(S({ severity: { type: 'string', enum: ['critical','major','moderate','minor'] }, category: str,
+                      issue: str, evidence: str, suggested_fix: str }, ['severity','category','issue','suggested_fix'])) },
+      ['role', 'score', 'summary', 'issues'])),
+  }, ['reviews']),
+};
+
+export const feedbackPlan = {
+  system: `${HOUSE_RULES}
+You are the Chief Editor. The author has left a note on one paragraph. Decide how the team applies it so the book reads
+as one flowing piece: which paragraphs must change (always the noted paragraph; also the paragraph just before or after
+it when the note is about flow, continuity or a missing build-up) and exactly what each change must achieve. Change as
+few paragraphs as needed (at most 4) and keep what already works. If the note also says something the author wants for
+the rest of the book (tone, focus, a recurring idea), state it as a short "standing_direction"; otherwise leave it empty.
+"message" is one or two sentences telling the author what will happen.`,
+  schema: S({
+    changes: arr(S({ paragraph: int, instruction: str }, ['paragraph', 'instruction'])),
+    standing_direction: str, message: str,
+  }, ['changes', 'message']),
 };

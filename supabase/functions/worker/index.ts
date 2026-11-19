@@ -95,6 +95,30 @@ async function manuscriptSoFar(db: SupabaseClient, bookId: string, exceptBlock?:
 
 const parse = (t: string) => JSON.parse(t);
 
+// The paragraphs around one paragraph, by position in the book (not "the latest ones").
+async function neighbours(db: SupabaseClient, bookId: string, blockId: string) {
+  const { data } = await db.from('manuscript_blocks')
+    .select('id, order_key, block_versions!manuscript_blocks_current_fk(text)')
+    .eq('book_id', bookId).neq('status', 'cut').order('order_key');
+  const all = (data ?? []) as any[];
+  const i = all.findIndex(b => b.id === blockId);
+  const txt = (b: any) => b.block_versions?.text ?? '';
+  const before = all.slice(0, i < 0 ? all.length : i).map(txt).filter(Boolean);
+  const after = i < 0 ? [] : all.slice(i + 1).map(txt).filter(Boolean).slice(0, 1);
+  return { before, after, number: i + 1 };
+}
+function aroundText(n: { before: string[]; after: string[] }, label = 'PARAGRAPHS BEFORE THIS ONE') {
+  return `${label} (${n.before.length}, last 8 shown):\n${n.before.slice(-8).join('\n\n') || '(none: this opens the book)'}\n\n` +
+    (n.after.length ? `THE PARAGRAPH THAT FOLLOWS (this one must lead into it naturally):\n${n.after[0]}\n\n` : '');
+}
+// The author's open notes: whole-book directions plus notes on this paragraph.
+async function directions(db: SupabaseClient, bookId: string, blockId?: string) {
+  const { data } = await db.from('author_notes').select('scope, note, block_id').eq('book_id', bookId).eq('status', 'open').order('created_at');
+  const list = (data ?? []).filter((n: any) => n.scope === 'book' || (blockId && n.block_id === blockId));
+  return list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
+    `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '';
+}
+
 // ------------------------------------------------------------------ jobs
 async function runJob(db: SupabaseClient, job: any, role: { team_code: string; default_tier: string }) {
   const app = db.schema('app');
@@ -208,10 +232,53 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     return { chapters: chs.length, words: total };
   }
 
+  if (key === 'feedback/plan') {
+    const { note_id, block_id } = job.payload;
+    const { data: note } = await db.from('author_notes').select('*').eq('id', note_id).single();
+    if (!note) return { skipped: 'note removed' };
+    const { data: rows } = await db.from('manuscript_blocks').select('id, order_key, block_versions!manuscript_blocks_current_fk(text)')
+      .eq('book_id', job.book_id).neq('status', 'cut').order('order_key');
+    const all = ((rows ?? []) as any[]).filter(b => b.block_versions?.text);
+    const idx = all.findIndex(b => b.id === block_id);
+    if (idx < 0) return { skipped: 'paragraph has no text yet' };
+    const lo = Math.max(0, idx - 4), hi = Math.min(all.length, idx + 3);
+    const ctx = await bookContext(db, job.book_id);
+    const r = await generate(db, { ...base, system: R.feedbackPlan.system, jsonSchema: R.feedbackPlan.schema, temperature: 0.3,
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nAUTHOR'S NOTE ON PARAGRAPH ${idx + 1}:\n"${note.note}"\n\n` +
+              `PARAGRAPHS ${lo + 1} TO ${hi}:\n${all.slice(lo, hi).map((b, k) => `[${lo + k + 1}] ${b.block_versions.text}`).join('\n\n')}` });
+    const o = parse(r.text);
+    const changes: { paragraph: number; instruction: string }[] = (o.changes ?? [])
+      .filter((c: any) => Number.isInteger(c.paragraph) && c.paragraph >= lo + 1 && c.paragraph <= hi && c.instruction)
+      .slice(0, 4);
+    if (!changes.some(c => c.paragraph === idx + 1)) changes.push({ paragraph: idx + 1, instruction: note.note });
+    changes.sort((a, b) => a.paragraph - b.paragraph);
+    for (const [k, c] of changes.entries()) {
+      const blk = all[c.paragraph - 1];
+      if (blk.id !== block_id) await db.from('author_notes').insert({ book_id: job.book_id, block_id: blk.id, scope: 'paragraph',
+        note: `(from your note on paragraph ${idx + 1}) ${c.instruction}` });
+      await app.rpc('reopen_for_feedback', { p_block: blk.id, p_note: note_id, p_priority: 93 - k,
+        p_instruction: `Author's note on paragraph ${idx + 1}: "${note.note}"\nWhat THIS paragraph (${c.paragraph}) must achieve: ${c.instruction}` });
+      // one at a time, in reading order, so each revision sees its neighbour's new text
+      if (k > 0) await db.from('agent_jobs').update({ run_after: new Date(Date.now() + k * 180_000).toISOString() })
+        .eq('step', 'revise').eq('status', 'queued').eq('payload->>block_id', blk.id);
+    }
+    const standing = String(o.standing_direction ?? '').trim();
+    if (standing) await db.from('author_notes').insert({ book_id: job.book_id, scope: 'book',
+      note: `${standing} (from your note on paragraph ${idx + 1})` });
+    await db.from('author_notes').update({ plan: { changes, standing_direction: standing || null } }).eq('id', note_id);
+    await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant',
+      content: `${o.message}\n` + changes.map(c => `• Paragraph ${c.paragraph}: ${c.instruction}`).join('\n') +
+               (standing ? `\nFrom now on, for the whole book: ${standing}` : '') +
+               `\nAfter that, the team carries on from where it left off.` });
+    return { changes: changes.length, paragraphs: changes.map(c => c.paragraph), standing: !!standing };
+  }
+
   if (key === 'paragraph/draft' || key === 'paragraph/revise') {
     const blockId = job.payload.block_id, loop = Number(job.payload.loop ?? 0);
     const ctx = await bookContext(db, job.book_id);
-    const prev = await manuscriptSoFar(db, job.book_id, blockId);
+    const around = await neighbours(db, job.book_id, blockId);
+    const prev = around.before;
+    const authorDirs = await directions(db, job.book_id, blockId);
     const { data: blk } = await db.from('manuscript_blocks').select('id, unit_id, current_version_id, block_versions!manuscript_blocks_current_fk(text)').eq('id', blockId).single();
     const current = (blk as any)?.block_versions?.text;
     // chapter context: which chapter this paragraph belongs to, its plan and how far along it is
@@ -238,17 +305,23 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\nAvoid: ${(ctx.voice?.banned_phrases ?? []).join('; ')}\n\n` +
               `BOOK BIBLE:\n${ctx.ents.map((e: any) => `- ${e.type} ${e.name}: ${e.profile?.summary ?? ''}`).join('\n')}\n\n` +
               `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` +
-              chapterText +
-              `MANUSCRIPT SO FAR (${prev.length} paragraphs, last 8 shown):\n${prev.slice(-8).join('\n\n') || '(none yet)'}\n\nTASK:\n${task}` });
+              chapterText + authorDirs + aroundText(around) + `TASK:\n${task}` });
     const text = r.text.trim().replace(/^["“]|["”]$/g, '');
     const { data: vid, error } = await app.rpc('commit_block_version', { p_block_id: blockId, p_text: text,
       p_reason: key === 'paragraph/draft' ? 'first draft' : `revision ${loop}`, p_actor_type: 'agent',
       p_provenance: key === 'paragraph/draft' ? 'ai_generated' : 'ai_edited' });
     if (error) throw new Error(error.message);
     await app.rpc('set_block_status', { p_block_id: blockId, p_status: 'in_review' });
-    for (const roleCode of Object.keys(R.LAYER1)) {
-      await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'review', p_role: roleCode,
+    const { data: mode } = await app.from('settings').select('value').eq('key', 'review_mode').maybeSingle();
+    if ((mode as any)?.value === 'panel') {
+      // one combined call for the five reviewers (saves 4 requests per version)
+      await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'review_panel', p_role: 'continuity_manager',
         p_priority: 88, p_payload: { block_id: blockId, block_version_id: vid, loop } });
+    } else {
+      for (const roleCode of Object.keys(R.LAYER1)) {
+        await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'review', p_role: roleCode,
+          p_priority: 88, p_payload: { block_id: blockId, block_version_id: vid, loop } });
+      }
     }
     return { block_version_id: vid, chars: text.length };
   }
@@ -259,13 +332,14 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
     if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
     const ctx = await bookContext(db, job.book_id);
-    const prev = await manuscriptSoFar(db, job.book_id, block_id);
+    const around = await neighbours(db, job.book_id, block_id);
+    const authorDirs = await directions(db, job.book_id, block_id);
     const { data: v } = await db.from('block_versions').select('text').eq('id', block_version_id).single();
     const spec = R.reviewer(meta.name, meta.focus);
     const r = await generate(db, { ...base, system: spec.system, jsonSchema: spec.schema, temperature: 0.2,
       prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\n\n` +
-              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` +
-              `EARLIER PARAGRAPHS (last 8):\n${prev.slice(-8).join('\n\n') || '(none — this is the opening)'}\n\nNEW PARAGRAPH TO REVIEW:\n"""${v!.text}"""` });
+              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + authorDirs +
+              aroundText(around, 'EARLIER PARAGRAPHS') + `PARAGRAPH TO REVIEW (number ${around.number}):\n"""${v!.text}"""` });
     const o = parse(r.text);
     await db.from('review_runs').upsert({ book_id: job.book_id, block_version_id, layer: 1, role_code: job.role_code,
       score: o.score, summary: o.summary, result: o }, { onConflict: 'block_version_id,role_code' });
@@ -281,6 +355,35 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     return { score: o.score, issues: o.issues?.length ?? 0 };
   }
 
+  if (key === 'paragraph/review_panel') {
+    const { block_id, block_version_id, loop } = job.payload;
+    const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
+    if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
+    const ctx = await bookContext(db, job.book_id);
+    const around = await neighbours(db, job.book_id, block_id);
+    const authorDirs = await directions(db, job.book_id, block_id);
+    const { data: v } = await db.from('block_versions').select('text').eq('id', block_version_id).single();
+    const r = await generate(db, { ...base, system: R.panel.system, jsonSchema: R.panel.schema, temperature: 0.2,
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\n\n` +
+              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + authorDirs +
+              aroundText(around, 'EARLIER PARAGRAPHS') + `PARAGRAPH TO REVIEW (number ${around.number}):\n"""${v!.text}"""` });
+    const o = parse(r.text);
+    const byRole = new Map<string, any>((o.reviews ?? []).map((x: any) => [x.role, x]));
+    let total = 0, nIssues = 0;
+    for (const roleCode of Object.keys(R.LAYER1)) {
+      const rv = byRole.get(roleCode) ?? { score: null, summary: 'No separate assessment returned.', issues: [] };
+      await db.from('review_runs').upsert({ book_id: job.book_id, block_version_id, layer: 1, role_code: roleCode,
+        score: rv.score, summary: rv.summary, result: { ...rv, via: 'panel' } }, { onConflict: 'block_version_id,role_code' });
+      if (rv.issues?.length) await db.from('editorial_issues').insert(rv.issues.map((i: any) => ({ book_id: job.book_id, block_id,
+        block_version_id, raised_by: roleCode, severity: i.severity, category: i.category, issue: i.issue,
+        evidence: i.evidence ?? null, suggested_fix: i.suggested_fix })));
+      total += Number(rv.score ?? 0); nIssues += rv.issues?.length ?? 0;
+    }
+    await db.from('agent_jobs').insert({ book_id: job.book_id, workflow: 'paragraph', step: 'consolidate', role_code: 'chief_editor',
+      priority: 89, payload: { block_id, block_version_id, loop } });
+    return { score: Math.round(total / Object.keys(R.LAYER1).length), issues: nIssues, panel: true };
+  }
+
   if (key === 'paragraph/consolidate') {
     const { block_id, block_version_id } = job.payload, loop = Number(job.payload.loop ?? 0);
     const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
@@ -290,8 +393,9 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       db.from('editorial_issues').select('id, raised_by, severity, category, issue, evidence, suggested_fix').eq('block_version_id', block_version_id),
       db.from('block_versions').select('text').eq('id', block_version_id).single(),
     ]);
+    const authorDirs = await directions(db, job.book_id, block_id);
     const r = await generate(db, { ...base, system: R.consolidate.system, jsonSchema: R.consolidate.schema, temperature: 0.2,
-      prompt: `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
+      prompt: authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
     const o = parse(r.text);
     const blocking = (issues ?? []).some((i: any) => i.severity === 'critical' || i.severity === 'major');
     // A critical/major issue always forces revision; otherwise only a weak overall score does (minor notes are kept for the author).

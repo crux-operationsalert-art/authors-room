@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
-import { app, kick, supabaseBrowser } from '@/lib/supabaseBrowser';
+import { app, kick, supabaseBrowser, BASE } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page } from './ui';
 
 type Book = { id: string; working_title: string; status: string; kind: string; privacy_mode: string; created_at: string };
@@ -51,7 +51,7 @@ export default function Home() {
           {mode === 'link' ? (
             <form onSubmit={async e => {
               e.preventDefault();
-              const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
+              const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin + BASE + '/' } });
               setMsg(error ? (error.message.toLowerCase().includes('rate') ? 'Too many sign-in emails were sent recently. Wait an hour, or use your password.' : error.message)
                            : 'Check your email for the sign-in link. Open it in this browser.');
             }}>
@@ -118,7 +118,7 @@ export default function Home() {
             </form>
           </details>
           {books.map(b => (
-            <a key={b.id} href={`/book?id=${b.id}`} style={{ ...card, display: 'block', textDecoration: 'none', color: C.ink }}>
+            <a key={b.id} href={`${BASE}/book/?id=${b.id}`} style={{ ...card, display: 'block', textDecoration: 'none', color: C.ink }}>
               <b>{b.working_title}</b>
               <div style={{ fontSize: 13, color: C.muted }}>{b.kind.replace('_', '-')} · {b.status} · {b.privacy_mode}</div>
             </a>
@@ -134,7 +134,7 @@ export default function Home() {
             setBusy(false);
             if (error) { setMsg(error.message); return; }
             kick();
-            window.location.href = `/book?id=${data}`;
+            window.location.href = `${BASE}/book/?id=${data}`;
           }}>
             <input style={input} placeholder="Working title (optional)" value={title} onChange={e => setTitle(e.target.value)} aria-label="Working title" />
             <textarea style={{ ...input, minHeight: 140, marginTop: 8 }} required placeholder="I have an idea for a story about…" value={idea} onChange={e => setIdea(e.target.value)} aria-label="Your idea" />

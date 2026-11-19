@@ -33,6 +33,8 @@ function Workspace() {
   const [units, setUnits] = useState<any[]>([]);
   const [approvals, setApprovals] = useState<any[]>([]);
   const [threshold, setThreshold] = useState<string>('');
+  const [notesList, setNotesList] = useState<any[]>([]);
+  const [bookNote, setBookNote] = useState('');
   const [runs, setRuns] = useState<any[]>([]);
   const [text, setText] = useState('');
   const [guidance, setGuidance] = useState('');
@@ -42,7 +44,7 @@ function Workspace() {
 
   const load = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap] = await Promise.all([
+    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
       sb.from('decisions').select('*').eq('book_id', id).eq('status', 'pending').order('created_at'),
@@ -58,11 +60,12 @@ function Workspace() {
         .eq('book_id', id).order('created_at', { ascending: false }).limit(300),
       sb.from('outline_units').select('id, parent_id, level, order_key, title, purpose, beats, target_words, status').eq('book_id', id).order('order_key'),
       sb.from('approvals').select('subject_id, via, note, created_at').eq('book_id', id).eq('subject_type', 'block'),
+      sb.from('author_notes').select('id, block_id, scope, note, status, created_at').eq('book_id', id).order('created_at', { ascending: false }),
     ]);
     setBook(b.data); setMsgs((m.data ?? []) as Msg[]); setDecisions((d.data ?? []) as Decision[]); setCons(c.data);
     setEnts(e.data ?? []); setBlocks((bl.data ?? []) as any); setIssues((is.data ?? []) as Issue[]);
     setReviews((rv.data ?? []) as Review[]); setJobs(j.data ?? []);
-    setAllJobs(aj.data ?? []); setRuns(ar.data ?? []); setUnits(ou.data ?? []); setApprovals(ap.data ?? []);
+    setAllJobs(aj.data ?? []); setRuns(ar.data ?? []); setUnits(ou.data ?? []); setApprovals(ap.data ?? []); setNotesList(an.data ?? []);
   }, [sb, id]);
 
   useEffect(() => {
@@ -192,6 +195,20 @@ function Workspace() {
                   Paragraph {paraNo(a.subject_id)}</a> — {a.note}</li>))}</ul>
             </details>
           )}
+          <div style={{ marginTop: 10 }}>
+            <b style={{ fontSize: 14 }}>Direction for the whole book</b>
+            <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+              <input style={{ ...input, flex: '1 1 240px' }} placeholder="e.g. Keep tying every chapter back to the core insult and its meaning"
+                     value={bookNote} onChange={e => setBookNote(e.target.value)} aria-label="Direction for the whole book" />
+              <button style={btn} onClick={() => { const t = bookNote.trim(); if (!t) return;
+                run(app().rpc('add_author_note', { p_book: id, p_block: null, p_note: t })).then(ok => { if (ok) setBookNote(''); }); }}>Add direction</button>
+            </div>
+            {notesList.filter(n => n.scope === 'book' && n.status === 'open').length > 0 && (
+              <ul style={{ fontSize: 13, margin: '6px 0 0', paddingLeft: 18 }}>
+                {notesList.filter(n => n.scope === 'book' && n.status === 'open').map(n => <li key={n.id}>{n.note}</li>)}
+              </ul>)}
+            <p style={{ fontSize: 12, color: C.muted, margin: '4px 0 0' }}>The writer and every reviewer follow these for every paragraph from now on.</p>
+          </div>
         </section>
       )}
       {failed.length > 0 && (
@@ -323,20 +340,23 @@ function Workspace() {
                   </details>
                 )}
                 {cdec && <p style={{ fontSize: 13, color: C.warn }}><b>Needs your decision:</b> {cdec.recommendation}</p>}
-                {b.status === 'qc_passed' && (
+                {notesList.filter(nn => nn.block_id === b.id && nn.status === 'open').map(nn => (
+                  <p key={nn.id} style={{ fontSize: 13, margin: '6px 0 0', paddingLeft: 8, borderLeft: `3px solid ${C.accent}` }}>
+                    <b>Your note (being applied):</b> {nn.note}</p>))}
+                {v && (b.status === 'qc_passed' || b.status === 'author_approved') && (
                   <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                    <button style={btnPrimary} onClick={async () => {
+                    {b.status === 'qc_passed' && <button style={btnPrimary} onClick={async () => {
                       if (cdec) await app().rpc('decide', { p_decision: cdec.id, p_choice: { title: 'Accept this version as it is' } });
                       run(app().rpc('approve_block', { p_block_id: b.id }));
-                    }}>Approve paragraph</button>
-                    <input style={{ ...input, flex: '1 1 200px' }} placeholder="What should change?" value={notes[b.id] ?? ''}
+                    }}>Approve paragraph</button>}
+                    <input style={{ ...input, flex: '1 1 200px' }} placeholder="Your feedback: what should change? The team adjusts this paragraph and the ones around it so it still flows" value={notes[b.id] ?? ''}
                            onChange={e => setNotes({ ...notes, [b.id]: e.target.value })} aria-label="Revision note" />
                     <button style={btn} onClick={async () => {
                       if (!notes[b.id]) { setErr('Write what should change first.'); return; }
                       if (cdec) await app().rpc('decide', { p_decision: cdec.id, p_choice: { title: 'Ask for another revision', note: notes[b.id] } });
                       run(app().rpc('request_revision', { p_block: b.id, p_note: notes[b.id] }));
                       setNotes({ ...notes, [b.id]: '' });
-                    }}>Ask for a revision</button>
+                    }}>{b.status === 'author_approved' ? 'Give feedback' : 'Ask for a revision'}</button>
                   </div>
                 )}
               </div>

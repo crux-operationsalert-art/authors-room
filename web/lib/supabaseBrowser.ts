@@ -32,4 +32,7 @@ export async function kick() {
   await callWorker({ action: 'tick' });   // failures are fine: the 1-minute schedule picks the job up anyway
 }
 
+/** Path prefix of the site ('' on your PC, '/authors-room' on GitHub Pages). */
+export const BASE = process.env.NEXT_PUBLIC_BASE_PATH || '';
+
 export const app = () => supabaseBrowser().schema('app');

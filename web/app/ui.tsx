@@ -1,4 +1,5 @@
 'use client';
+import { BASE } from '@/lib/supabaseBrowser';
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 
 export const C = { ink: '#1f2328', muted: '#59636e', line: '#d0d7de', soft: '#f6f8fa', accent: '#0969da', ok: '#1a7f37', warn: '#9a6700', bad: '#cf222e' };
@@ -31,9 +32,9 @@ export function Header({ children }: { children?: ReactNode }) {
     <>
     <OfflineBanner />
     <header style={{ display: 'flex', alignItems: 'center', gap: 16, borderBottom: `1px solid ${C.line}`, paddingBottom: 10, marginBottom: 16 }}>
-      <a href="/" style={{ fontWeight: 700, fontSize: 18, color: C.ink, textDecoration: 'none' }}>Author’s Room</a>
+      <a href={`${BASE}/`} style={{ fontWeight: 700, fontSize: 18, color: C.ink, textDecoration: 'none' }}>Author’s Room</a>
       <nav style={{ display: 'flex', gap: 12, fontSize: 14 }}>
-        <a href="/">Books</a><a href="/keys">AI keys & quota</a>
+        <a href={`${BASE}/`}>Books</a><a href={`${BASE}/keys/`}>AI keys & quota</a>
       </nav>
       <div style={{ marginLeft: 'auto' }}>{children}</div>
     </header>

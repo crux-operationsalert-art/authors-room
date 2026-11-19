@@ -89,6 +89,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   const t_all = Date.now();
   let lastMsg = '';
   let quotaWait = startAt ? Number(wait) : 0;   // set when a model's DAILY free limit is used up and we moved on
+  let busyElsewhere = false;                     // a model was busy/failed (not used up): worth retrying soon
   for (let mi = startAt; mi < chain.length; mi++) {
     const m = chain[mi];
     if (mi > startAt && Date.now() - t_all > 60_000) break;          // stay inside the function's time limit
@@ -98,7 +99,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m.id)}:generateContent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': String(secret) },
         body: JSON.stringify({ ...body, generationConfig: { ...body.generationConfig, ...(thinkingFor(m.id) ? { thinkingConfig: thinkingFor(m.id) } : {}) } }),
-        signal: AbortSignal.timeout(75_000),
+        signal: AbortSignal.timeout(60_000),
       });
       status = res.status; retryAfter = Number(res.headers.get('retry-after')) || 0;
       json = await res.json().catch(() => ({}));
@@ -113,13 +114,14 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
       if (!text.trim()) {   // blocked or empty reply (e.g. safety filter): never save a blank paragraph
         lastMsg = `empty reply (finish=${json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? 'unknown'})`;
         await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: 'error', http_status: 200, error: lastMsg });
+        busyElsewhere = true;
         continue;
       }
       let st = 'ok';
       if (req.jsonSchema) { try { JSON.parse(text); } catch { st = 'schema_invalid'; } }
       await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: st, http_status: 200,
                      error: st === 'ok' ? null : `finish=${json?.candidates?.[0]?.finishReason}; starts: ${text.slice(0, 150)}` });
-      if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; if (mi < chain.length - 1) continue; throw new Error('Model output was not valid JSON for the role schema.'); }
+      if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; busyElsewhere = true; if (mi < chain.length - 1) continue; throw new Error('Model output was not valid JSON for the role schema.'); }
       return { text, modelId: m.id, inputTokens: inTok, outputTokens: outTok, costEstimate: cost, keyLabel: key.label };
     }
     const msg = json?.error?.message ?? `HTTP ${status}`;
@@ -138,8 +140,11 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
     await record({ model_id: m.id, latency_ms, status: 'error', http_status: status || null, error: msg });
     // 5xx, timeouts and 404 (model retired for this project) move on to the next model; other errors stop.
     if (!(status === 0 || status >= 500 || status === 404)) throw new Error(`Gemini call failed (HTTP ${status}): ${msg}`);
+    if (status !== 404) busyElsewhere = true;
     await sleep(1500);   // brief pause, then the next model in the chain
   }
-  if (quotaWait) throw new QuotaExhaustedError(`Gemini daily free limits reached for every model in tier "${req.tier}"`, Math.min(quotaWait, 86400));
+  // Park until tomorrow ONLY when every model really is used up; if some were just busy, try again soon.
+  if (quotaWait && !busyElsewhere) throw new QuotaExhaustedError(`Gemini daily free limits reached for every model in tier "${req.tier}"`, Math.min(quotaWait, 86400));
+  if (quotaWait) throw new QuotaExhaustedError(`Main model used up for today and the backup models are busy; trying again in 2 minutes`, 120);
   throw new Error(`All models for tier "${req.tier}" are unavailable right now: ${lastMsg}`);
 }
