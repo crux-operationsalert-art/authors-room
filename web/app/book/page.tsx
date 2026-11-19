@@ -318,7 +318,12 @@ function Workspace() {
                 {ch!.target_words ? <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}> · {wordsIn(ch!.id).toLocaleString('en-IN')} / {ch!.target_words.toLocaleString('en-IN')} words</span> : null}</h3>}
               <div id={`act-block-${b.id}`} style={card}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-                  <b style={{ fontSize: 13 }}>¶ {n + 1}</b>{flag?.via === 'autopilot' && b.status === 'author_approved' ? null : <Status s={b.status} />}
+                  <b style={{ fontSize: 13 }}>¶ {n + 1}</b>{flag?.via === 'autopilot' && b.status === 'author_approved' ? null
+                    : book.autopilot && b.status !== 'author_approved' ? (() => {
+                        const sc = allJobs.filter(j => j.step === 'consolidate' && j.status === 'done' && j.payload?.block_id === b.id && j.result?.score != null).map(j => Number(j.result.score));
+                        return <span style={{ fontSize: 12, fontWeight: 600, color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: '1px 8px' }}>
+                          Autopilot is improving it{sc.length ? ` · best so far ${Math.max(...sc)}` : ''} · needs above {book.autopilot_threshold}</span>; })()
+                    : <Status s={b.status} />}
                   {v && <span style={{ fontSize: 12, color: C.muted }}>v{v.version_no} · {v.provenance.replace('_', ' ')}</span>}
                   {flag?.via === 'autopilot' && <span style={{ fontSize: 12, color: flag.note ? C.warn : C.ok }}>{flag.note ? '⚑ Approved by autopilot · review later' : '✓ Approved by autopilot'}</span>}
                   {avg !== null && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>Review score {avg}/100</span>}
