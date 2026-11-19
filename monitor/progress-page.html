@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Author's Room — progress</title>
+<style>
+  :root { --ink:#1f2328; --muted:#59636e; --line:#d0d7de; --soft:#f6f8fa; --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --accent:#0969da; --bg:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --ink:#e6edf3; --muted:#9198a1; --line:#3d444d; --soft:#151b23; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#4493f8; --bg:#0d1117; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:var(--bg); }
+  main { max-width:760px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0 0 2px; } h2 { font-size:16px; margin:20px 0 8px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:10px; background:var(--bg); }
+  .row { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+  .pill { font-size:12px; font-weight:600; border:1px solid currentColor; border-radius:10px; padding:0 8px; }
+  .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .acc{color:var(--accent)}
+  .bar { height:8px; background:var(--soft); border-radius:4px; overflow:hidden; margin:6px 0 2px; }
+  .bar > i { display:block; height:100%; background:var(--ok); }
+  .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; text-align:center; margin-top:8px; }
+  .grid b { display:block; font-size:18px; }
+  blockquote { margin:8px 0 0; padding:8px 10px; background:var(--soft); border-radius:8px; font-family:Georgia,serif; font-size:14.5px; }
+  ul { margin:4px 0 0; padding-left:18px; } li { margin:2px 0; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; } td,th { text-align:left; padding:5px 4px; border-bottom:1px solid var(--line); }
+  button { font:inherit; padding:7px 12px; border-radius:6px; border:1px solid var(--line); background:var(--soft); color:var(--ink); cursor:pointer; }
+  .notice { border-left:4px solid var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Author's Room — progress</h1>
+  <div class="muted" id="fresh">Connecting…</div>
+  <div id="state" class="card notice" hidden></div>
+  <section id="books"></section>
+  <section id="team"></section>
+  <section id="health"></section>
+  <p class="muted">Read-only view. It reads your Author's Room database through your Supabase connector and refreshes every
+    minute while open. To write, approve or reply, use the app.</p>
+</main>
+<script>
+const PROJECT = 'hbmelugvtvinmqwkxtgx';
+const ROLE = { chief_editor:'Chief Editor', author_interviewer:'Interviewer', genre_strategist:'Genre Strategist', story_architect:'Story Architect',
+  lead_writer:'Lead Writer', voice_custodian:'Voice reviewer', continuity_manager:'Continuity reviewer', logic_fact_checker:'Logic & fact reviewer',
+  line_copy_editor:'Language reviewer', reader_panel_manager:'Simulated reader' };
+const STEP = { interview:'interviewing you', directions:'proposing directions', draft:'drafting', revise:'revising', review:'reviewing',
+  consolidate:'consolidating reviews', extract_facts:'recording new facts', seed:'building the Book Bible', ping:'connection test' };
+const BOOKSTATUS = { intake:'Interview', planning:'Planning', writing:'Writing', production:'Production', released:'Released' };
+
+const QUERY = `select jsonb_build_object(
+ 'now', now(),
+ 'books', (select coalesce(jsonb_agg(x order by x->>'created_at' desc), '[]') from (
+   select jsonb_build_object('title', b.working_title, 'status', b.status, 'privacy', b.privacy_mode, 'created_at', b.created_at,
+     'paras', (select count(*) from manuscript_blocks m where m.book_id = b.id and m.current_version_id is not null),
+     'approved', (select count(*) from manuscript_blocks m where m.book_id = b.id and m.status = 'author_approved'),
+     'awaiting', (select count(*) from manuscript_blocks m where m.book_id = b.id and m.status = 'qc_passed'),
+     'words', (select coalesce(sum(array_length(regexp_split_to_array(trim(v.text), '\\s+'), 1)), 0) from manuscript_blocks m join block_versions v on v.id = m.current_version_id where m.book_id = b.id and m.status = 'author_approved'),
+     'target', (select length_target from book_constitutions c where c.book_id = b.id order by version desc limit 1),
+     'constitution', (select status from book_constitutions c where c.book_id = b.id order by version desc limit 1),
+     'decisions', (select count(*) from decisions d where d.book_id = b.id and d.status = 'pending'),
+     'failed', (select count(*) from agent_jobs j where j.book_id = b.id and j.status = 'failed'),
+     'last_text', (select left(v.text, 400) from manuscript_blocks m join block_versions v on v.id = m.current_version_id where m.book_id = b.id order by m.order_key desc limit 1),
+     'last_status', (select m.status from manuscript_blocks m where m.book_id = b.id and m.current_version_id is not null order by m.order_key desc limit 1),
+     'last_msg', (select jsonb_build_object('role', role, 'text', left(content, 280), 'at', created_at) from intake_messages i where i.book_id = b.id order by created_at desc limit 1),
+     'last_activity', greatest((select max(created_at) from agent_runs r where r.book_id = b.id), (select max(created_at) from intake_messages i where i.book_id = b.id))
+   ) x from books b where b.archived_at is null) s),
+ 'jobs', (select coalesce(jsonb_agg(jsonb_build_object('role', j.role_code, 'step', j.step, 'status', j.status, 'book', b.working_title, 'error', left(j.last_error, 140)) order by j.priority desc), '[]')
+   from agent_jobs j left join books b on b.id = j.book_id where j.status in ('running','queued','waiting_quota','failed')),
+ 'models', (select coalesce(jsonb_agg(jsonb_build_object('model', model_id, 'ok', ok, 'limited', limited, 'errors', errors)), '[]') from (
+   select model_id, count(*) filter (where status = 'ok') ok, count(*) filter (where status = 'rate_limited') limited,
+          count(*) filter (where status in ('error','schema_invalid')) errors
+     from agent_runs where created_at >= app.pacific_day_start() group by model_id) m),
+ 'reset_at', app.pacific_day_start() + interval '1 day',
+ 'cron', (select jsonb_build_object('last', max(start_time), 'failed_1h', count(*) filter (where status <> 'succeeded' and start_time > now() - interval '1 hour'))
+   from cron.job_run_details where start_time > now() - interval '1 day')
+) as r`;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const ago = t => { if (!t) return '—'; const m = Math.round((Date.now() - Date.parse(t)) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m/60)} h ago` : `${Math.round(m/1440)} d ago`; };
+const ist = t => t ? new Date(t).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '—';
+
+function parsePayload(result) {
+  let p = result?.payload ?? result;
+  if (p && typeof p === 'object' && typeof p.result === 'string') p = p.result;
+  if (typeof p === 'string') {
+    const m = p.match(/<untrusted-data-[^>]*>\s*([\s\S]*?)\s*<\/untrusted-data/);
+    p = JSON.parse(m ? m[1] : p);
+  }
+  if (Array.isArray(p)) p = p[0];
+  return p?.r ?? p;
+}
+
+function render(d) {
+  const books = d.books ?? [];
+  $('books').innerHTML = `<h2>Books</h2>` + (books.length ? books.map(b => {
+    const pct = b.paras ? Math.round(100 * b.approved / b.paras) : 0;
+    const needYou = [];
+    if (b.constitution === 'proposed') needYou.push('approve the constitution');
+    if (b.decisions) needYou.push(`${b.decisions} decision${b.decisions > 1 ? 's' : ''}`);
+    if (b.awaiting) needYou.push(`${b.awaiting} paragraph${b.awaiting > 1 ? 's' : ''} to approve`);
+    if (b.last_msg && b.last_msg.role === 'assistant' && b.status === 'intake') needYou.push('reply to the interviewer');
+    return `<div class="card">
+      <div class="row"><b>${esc(b.title)}</b><span class="pill acc">${esc(BOOKSTATUS[b.status] ?? b.status)}</span>
+        ${b.failed ? `<span class="pill bad">${b.failed} step${b.failed > 1 ? 's' : ''} failed — open the app to retry</span>` : ''}</div>
+      <div class="muted">Last activity ${ago(b.last_activity)} · ${esc(b.privacy)}${b.target ? ` · target ${esc(b.target)}` : ''}</div>
+      <div class="grid"><div><b>${b.paras}</b><span class="muted">paragraphs</span></div><div><b>${b.approved}</b><span class="muted">approved</span></div>
+        <div><b>${b.awaiting}</b><span class="muted">awaiting you</span></div><div><b>${Number(b.words).toLocaleString('en-IN')}</b><span class="muted">approved words</span></div></div>
+      ${b.paras ? `<div class="bar" title="${pct}% approved"><i style="width:${pct}%"></i></div>` : ''}
+      ${needYou.length ? `<p class="warn" style="margin:8px 0 0"><b>Needs you:</b> ${needYou.join(' · ')}</p>` : ''}
+      ${b.last_text ? `<blockquote>${esc(b.last_text)}${b.last_text.length >= 400 ? '…' : ''}<div class="muted" style="font-family:system-ui">Latest paragraph · ${esc((b.last_status ?? '').replace('_', ' '))}</div></blockquote>`
+        : b.last_msg ? `<blockquote style="font-family:system-ui">${esc(b.last_msg.text)}<div class="muted">${b.last_msg.role === 'assistant' ? 'Team' : b.last_msg.role === 'system' ? 'Notice' : 'You'} · ${ago(b.last_msg.at)}</div></blockquote>` : ''}
+    </div>`; }).join('') : `<div class="card muted">No books yet.</div>`);
+
+  const jobs = d.jobs ?? [];
+  const live = jobs.filter(j => j.status !== 'failed');
+  $('team').innerHTML = `<h2>What the team is doing</h2><div class="card">` + (live.length ? `<ul>${live.map(j =>
+    `<li><b>${esc(ROLE[j.role] ?? j.role)}</b> ${esc(STEP[j.step] ?? j.step)}${j.book ? ` · ${esc(j.book)}` : ''} — <span class="${j.status === 'waiting_quota' ? 'warn' : j.status === 'running' ? 'ok' : 'muted'}">${j.status === 'running' ? 'working now' : j.status === 'waiting_quota' ? 'waiting for Google quota' : 'queued'}</span></li>`).join('')}</ul>`
+    : `<span class="muted">Idle — nothing queued. The team works only when a book needs it.</span>`) + `</div>`;
+
+  const models = d.models ?? [];
+  const limited = models.reduce((s, m) => s + m.limited, 0);
+  const cronOk = d.cron?.last && (Date.now() - Date.parse(d.cron.last) < 5 * 60000) && !d.cron.failed_1h;
+  $('health').innerHTML = `<h2>Health</h2><div class="card">
+    <div class="row"><span class="pill ${cronOk ? 'ok' : 'bad'}">${cronOk ? 'Worker running' : 'Worker not running'}</span>
+      <span class="muted">last run ${ago(d.cron?.last)}</span></div>
+    <table style="margin-top:8px"><tr><th>Model (today, Pacific day)</th><th>OK</th><th>Quota hits</th><th>Errors</th></tr>
+      ${models.length ? models.map(m => `<tr><td>${esc(m.model)}</td><td>${m.ok}</td><td class="${m.limited ? 'warn' : ''}">${m.limited}</td><td class="${m.errors ? 'bad' : ''}">${m.errors}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No AI calls yet today.</td></tr>`}
+    </table>
+    <div class="muted" style="margin-top:6px">${limited ? 'Quota was reached today; waiting work resumes by itself. ' : ''}Daily quota resets ${ist(d.reset_at)} IST.</div></div>`;
+}
+
+function showState(html) { const s = $('state'); s.hidden = !html; s.innerHTML = html ?? ''; }
+
+(async () => {
+  const mcp = await claude.use('mcp');
+  if (!mcp) { $('fresh').textContent = ''; showState('This page needs to be opened in Claude (web or app) with your Supabase connector connected.'); return; }
+  let unsub = null;
+  const start = () => {
+    if (unsub) unsub();
+    unsub = mcp.watchTool('Supabase', 'execute_sql', { project_id: PROJECT, query: QUERY }, ev => {
+      if (ev.type === 'data') {
+        try { render(parsePayload(ev.result)); showState(null);
+              $('fresh').textContent = `Updated ${ago(new Date(ev.result.cache?.storedAt ?? Date.now()).toISOString())} · refreshes every minute`; }
+        catch (e) { showState('Could not read the reply from Supabase. Pull to refresh in a minute.'); }
+        return;
+      }
+      const c = ev.error?.code;
+      if (['needs_reauth'].includes(c)) { $('books').innerHTML = $('team').innerHTML = $('health').innerHTML = ''; showState('Your Supabase connector needs reconnecting: claude.ai → Settings → Connectors → Supabase.'); }
+      else if (c === 'server_not_connected' || c === 'selection_required') { $('books').innerHTML = $('team').innerHTML = $('health').innerHTML = ''; showState('Add or choose your Supabase connector in claude.ai Settings → Connectors, then reopen this page.'); }
+      else if (c === 'approval_required' || c === 'not_in_manifest' || c === 'blocked_by_policy') {
+        showState(`This page needs your permission to read your Author's Room database. <button id="allow">Allow and load</button>`);
+        $('allow').onclick = async () => { try { const r = await mcp.callTool('Supabase', 'execute_sql', { project_id: PROJECT, query: QUERY }); render(parsePayload(r)); showState(null); start(); } catch (e) { showState(`Still not allowed (${esc(e.code)}).`); } };
+      }
+      else showState(`Supabase did not answer just now (${esc(c ?? 'unknown')}). The last data shown is kept; it retries every minute.`);
+    }, { refetchInterval: 60000, cache: { staleTime: 30000, gcTime: 600000 } });
+  };
+  start();
+})();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p2-v2';
+export const PROMPT_VERSION = 'p2-v3';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -16,7 +16,9 @@ You are the Author Interviewer. From the author's idea and the conversation so f
 at most TWO short, plain-language follow-up questions about what is still missing. Never use publishing jargon.
 The brief is ready when premise, audience, intended reader experience, tone, point of view and approximate length are known
 (reasonable defaults may be proposed and confirmed). When ready, say so warmly and tell the author that the team
-will now propose directions. Reply to the author in "reply".`,
+will now propose directions. Never ask the same question twice. If the author asks to move on, or has already answered
+twice, set ready=true: fill any gaps with sensible defaults, list them in the reply so the author can change them later,
+and do not ask further questions. The author's time matters more than a perfect brief. Reply to the author in "reply".`,
   schema: S({
     reply: str,
     brief: S({

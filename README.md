@@ -68,6 +68,33 @@ When a quota is used up, work waits and resumes by itself; the book page shows "
 Books marked **Standard** run on the free tier, where Google may use content to improve its products.
 Books marked **Confidential** pause until the Gemini project is on a paid tier.
 
+## Reliability: what happens when things go wrong
+
+- **Laptop off, browser closed, internet lost:** the work carries on in the cloud. A schedule in the database calls the
+  worker every minute; a watchdog every 5 minutes restarts any step that was interrupted. Tested: browser closed for
+  4 minutes mid-paragraph; on return the paragraph was written and had passed all five reviews.
+- **While offline** the app shows a yellow banner. Actions do not go through and say so plainly; a reply you typed is
+  kept in the box. The page refreshes itself when you reconnect.
+- **Double clicks** never send twice (one action at a time; the database also refuses duplicates).
+- **Where everything is stored:** Supabase Postgres in Mumbai (ap-south-1): ideas, chat, every paragraph version, reviews,
+  decisions and the usage log. Gemini keys are in Supabase Vault. Nothing lives on the laptop except your sign-in.
+- **Backups:** the free plan has no automatic backups. Use *Download backup (.json)* on each book regularly, or move to
+  Supabase Pro ($25/month, daily backups) before relying on it for a real book.
+- **Images:** not generated yet (cover and illustration work is a later phase).
+
+## Watch progress remotely
+
+- **Phone or any computer, read-only:** open the *Author's Room — progress* page in Claude (web or app). It reads your
+  database through your Supabase connector and refreshes every minute. Source: `monitor/progress-page.html`.
+- **Full app from anywhere:** host the `web/out` folder (for example on Netlify, free), then add the site's address to
+  Supabase → Authentication → URL configuration → Redirect URLs.
+
+## Testing
+
+- `supabase/tests` — 26 database checks (`local/test.sh`).
+- `e2e/test.mjs` — full browser test as an author against the live system; `e2e/recheck.mjs` — focused re-check.
+- `supabase/scripts/reset-test-user.sql` — removes the test user and its books afterwards.
+
 ## Code
 
 ```

@@ -12,6 +12,9 @@ export default function Home() {
   const [books, setBooks] = useState<Book[]>([]);
   const [msg, setMsg] = useState<string | null>(null);
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [mode, setMode] = useState<'link' | 'password'>('link');
   const [name, setName] = useState('');
   const [title, setTitle] = useState('');
   const [idea, setIdea] = useState('');
@@ -41,15 +44,32 @@ export default function Home() {
         <Header />
         <div style={{ ...card, maxWidth: 480 }}>
           <h2 style={{ marginTop: 0 }}>Sign in</h2>
-          <p style={{ color: C.muted }}>We’ll email you a sign-in link. Open it on this computer.</p>
-          <form onSubmit={async e => {
-            e.preventDefault();
-            const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
-            setMsg(error ? error.message : 'Check your email for the sign-in link.');
-          }}>
-            <input style={input} type="email" required placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} aria-label="Email" />
-            <div style={{ marginTop: 8 }}><button style={btnPrimary}>Email me a link</button></div>
-          </form>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            <button style={mode === 'link' ? btnPrimary : btn} onClick={() => setMode('link')}>Email me a link</button>
+            <button style={mode === 'password' ? btnPrimary : btn} onClick={() => setMode('password')}>Use my password</button>
+          </div>
+          {mode === 'link' ? (
+            <form onSubmit={async e => {
+              e.preventDefault();
+              const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } });
+              setMsg(error ? (error.message.toLowerCase().includes('rate') ? 'Too many sign-in emails were sent recently. Wait an hour, or use your password.' : error.message)
+                           : 'Check your email for the sign-in link. Open it in this browser.');
+            }}>
+              <input style={input} type="email" required placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} aria-label="Email" />
+              <div style={{ marginTop: 8 }}><button style={btnPrimary}>Send the link</button></div>
+              <p style={{ fontSize: 12.5, color: C.muted }}>First time? Use the link. Once signed in, set a password so you never depend on email.</p>
+            </form>
+          ) : (
+            <form onSubmit={async e => {
+              e.preventDefault();
+              const { error } = await sb.auth.signInWithPassword({ email, password });
+              setMsg(error ? 'That email and password did not match. Use “Email me a link” if you have not set a password yet.' : null);
+            }}>
+              <input style={input} type="email" required placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} aria-label="Email" />
+              <input style={{ ...input, marginTop: 8 }} type="password" required placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} aria-label="Password" />
+              <div style={{ marginTop: 8 }}><button style={btnPrimary}>Sign in</button></div>
+            </form>
+          )}
           {msg && <p role="status">{msg}</p>}
         </div>
       </main>
@@ -80,10 +100,23 @@ export default function Home() {
   return (
     <main style={page}>
       <Header><button style={btn} onClick={() => sb.auth.signOut()}>Sign out</button></Header>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.2fr)', gap: 16 }}>
+      <div className="two-col">
         <section>
           <h2 style={{ marginTop: 0 }}>Your books</h2>
           {books.length === 0 && <p style={{ color: C.muted }}>No books yet. Start one on the right.</p>}
+          <details style={{ ...card, fontSize: 14 }}>
+            <summary>Account: set or change your password</summary>
+            <p style={{ color: C.muted, fontSize: 13 }}>With a password you can sign in even when sign-in emails are delayed or limited.</p>
+            <form onSubmit={async e => {
+              e.preventDefault();
+              if (newPw.length < 10) { setMsg('Use at least 10 characters.'); return; }
+              const { error } = await sb.auth.updateUser({ password: newPw });
+              setMsg(error ? error.message : 'Password saved. You can now sign in with it.'); setNewPw('');
+            }} style={{ display: 'flex', gap: 8 }}>
+              <input style={input} type="password" placeholder="New password (10+ characters)" value={newPw} onChange={e => setNewPw(e.target.value)} aria-label="New password" />
+              <button style={btn}>Save</button>
+            </form>
+          </details>
           {books.map(b => (
             <a key={b.id} href={`/book?id=${b.id}`} style={{ ...card, display: 'block', textDecoration: 'none', color: C.ink }}>
               <b>{b.working_title}</b>
@@ -92,6 +125,7 @@ export default function Home() {
           ))}
         </section>
         <section style={card}>
+          {msg && <p role="status" style={{ background: '#ddf4ff', padding: 8, borderRadius: 6 }}>{msg}</p>}
           <h2 style={{ marginTop: 0 }}>Start a new book</h2>
           <p style={{ color: C.muted, marginTop: 0 }}>Describe your idea in your own words. It doesn’t need to be complete — the team will ask what it needs.</p>
           <form onSubmit={async e => {
@@ -120,7 +154,6 @@ export default function Home() {
             </p>
             <button style={btnPrimary} disabled={busy}>{busy ? 'Starting…' : 'Start my book'}</button>
           </form>
-          {msg && <p role="status" style={{ color: C.bad }}>{msg}</p>}
         </section>
       </div>
     </main>

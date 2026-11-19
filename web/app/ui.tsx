@@ -1,5 +1,5 @@
 'use client';
-import type { CSSProperties, ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 
 export const C = { ink: '#1f2328', muted: '#59636e', line: '#d0d7de', soft: '#f6f8fa', accent: '#0969da', ok: '#1a7f37', warn: '#9a6700', bad: '#cf222e' };
 export const page: CSSProperties = { fontFamily: 'system-ui, -apple-system, Segoe UI, sans-serif', color: C.ink, maxWidth: 1100, margin: '0 auto', padding: '16px' };
@@ -8,8 +8,28 @@ export const btn: CSSProperties = { padding: '7px 12px', borderRadius: 6, border
 export const btnPrimary: CSSProperties = { ...btn, background: C.accent, color: '#fff', borderColor: C.accent };
 export const input: CSSProperties = { padding: 8, borderRadius: 6, border: `1px solid ${C.line}`, fontSize: 14, width: '100%', boxSizing: 'border-box' };
 
+/** Shows a banner when the browser loses its connection. Work already sent keeps running in the cloud. */
+export function OfflineBanner() {
+  const [online, setOnline] = useState(true);
+  useEffect(() => {
+    const up = () => setOnline(true), down = () => setOnline(false);
+    setOnline(navigator.onLine);
+    window.addEventListener('online', up); window.addEventListener('offline', down);
+    return () => { window.removeEventListener('online', up); window.removeEventListener('offline', down); };
+  }, []);
+  if (online) return null;
+  return (
+    <div role="alert" style={{ background: '#fff8c5', border: `1px solid ${C.warn}`, borderRadius: 6, padding: '8px 12px', marginBottom: 12, fontSize: 14 }}>
+      <b>You are offline.</b> Nothing is lost: your book is stored in the cloud and the team keeps working on anything already
+      sent. Actions you take now will not go through until you are back online; this page refreshes itself when you reconnect.
+    </div>
+  );
+}
+
 export function Header({ children }: { children?: ReactNode }) {
   return (
+    <>
+    <OfflineBanner />
     <header style={{ display: 'flex', alignItems: 'center', gap: 16, borderBottom: `1px solid ${C.line}`, paddingBottom: 10, marginBottom: 16 }}>
       <a href="/" style={{ fontWeight: 700, fontSize: 18, color: C.ink, textDecoration: 'none' }}>Author’s Room</a>
       <nav style={{ display: 'flex', gap: 12, fontSize: 14 }}>
@@ -17,6 +37,7 @@ export function Header({ children }: { children?: ReactNode }) {
       </nav>
       <div style={{ marginLeft: 'auto' }}>{children}</div>
     </header>
+    </>
   );
 }
 

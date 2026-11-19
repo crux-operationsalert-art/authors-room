@@ -40,7 +40,21 @@ end $$;
 
 -- T4: author approves; then agent change without approval is refused
 set local request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
+-- T4a: approval is refused while the paragraph is still in review
+do $$ begin
+  begin perform app.approve_block('00000000-0000-0000-0000-0000000000c1'); raise exception 'T4a fail: approved before review';
+  exception when others then if sqlerrm not like '%still reviewing%' then raise; end if; end;
+  raise notice 'T4a pass: approval waits for review';
+end $$;
+select app.set_block_status('00000000-0000-0000-0000-0000000000c1', 'qc_passed');
 select app.approve_block('00000000-0000-0000-0000-0000000000c1');
+-- T4b: late workflow status changes cannot un-approve
+select app.set_block_status('00000000-0000-0000-0000-0000000000c1', 'in_review');
+do $$ begin
+  if (select status from manuscript_blocks where id='00000000-0000-0000-0000-0000000000c1') <> 'author_approved'
+    then raise exception 'T4b fail: approval undone by workflow'; end if;
+  raise notice 'T4b pass: approval cannot be undone by the workflow';
+end $$;
 do $$ begin
   begin perform app.commit_block_version('00000000-0000-0000-0000-0000000000c1','Sneaky edit.','x','agent','ai_edited');
         raise exception 'T4 fail: unapproved change to approved block';

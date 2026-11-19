@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
-import { supabaseBrowser } from '@/lib/supabaseBrowser';
+import { callWorker, supabaseBrowser } from '@/lib/supabaseBrowser';
 import { Header } from '../ui';
 
 type KeyRow = {
@@ -66,14 +66,14 @@ export default function KeysPage() {
   }
   async function addKey(e: React.FormEvent) {
     e.preventDefault();
-    const { data: j, error } = await sb.functions.invoke('worker', { body: { action: 'add_key', secret: newKey, team: newTeam || null } });
+    const { data: j, error } = await callWorker({ action: 'add_key', secret: newKey, team: newTeam || null });
     setNewKey('');
     setMsg(error ? error.message : j.error ? j.error : `Added ${j.label} (••••${j.last4})${j.team ? ` for ${j.team}` : ' as standby'}.`);
     load();
   }
   async function checkKeys() {
     setMsg('Checking every key with Google…');
-    const { data: j, error } = await sb.functions.invoke('worker', { body: { action: 'check_keys' } });
+    const { data: j, error } = await callWorker({ action: 'check_keys' });
     if (error) { setMsg(error.message); return; }
     const bad = (j.keys ?? []).filter((k: any) => !k.ok);
     setMsg(bad.length ? `Problem keys: ${bad.map((k: any) => `${k.label} (${k.error ?? k.note})`).join(', ')}` : `All ${j.keys.length} keys are valid.`);

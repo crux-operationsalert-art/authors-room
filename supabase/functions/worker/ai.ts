@@ -97,6 +97,11 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
       const u = json?.usageMetadata ?? {};
       const inTok = u.promptTokenCount ?? 0, outTok = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);
       const cost = (inTok * m.pin + outTok * m.pout) / 1e6;
+      if (!text.trim()) {   // blocked or empty reply (e.g. safety filter): never save a blank paragraph
+        lastMsg = `empty reply (finish=${json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? 'unknown'})`;
+        await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: 'error', http_status: 200, error: lastMsg });
+        continue;
+      }
       let st = 'ok';
       if (req.jsonSchema) { try { JSON.parse(text); } catch { st = 'schema_invalid'; } }
       await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: st, http_status: 200,

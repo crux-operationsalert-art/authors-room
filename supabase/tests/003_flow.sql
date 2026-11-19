@@ -31,4 +31,20 @@ do $$ begin
   begin perform app.claim_author('Intruder'); raise exception 'F4 fail';
   exception when sqlstate '42501' then raise notice 'F4 pass: single author'; end;
 end $$;
+-- F5: watchdog restarts a stalled draft and exports a backup
+do $$ declare b uuid; r jsonb; begin
+  select id into b from books limit 1;
+  update manuscript_blocks set created_at = now() - interval '20 minutes' where book_id = b;
+  delete from agent_jobs where workflow = 'paragraph';
+  r := app.watchdog();
+  if (r->>'drafts')::int <> 1 then raise exception 'F5 fail: watchdog %', r; end if;
+  raise notice 'F5 pass: watchdog restarted a stalled draft';
+end $$;
+set local request.jwt.claim.sub = '33333333-3333-3333-3333-333333333333';
+do $$ declare b uuid; j jsonb; begin
+  select id into b from books limit 1;
+  j := app.export_book(b);
+  if j->'book'->>'working_title' <> 'Pilot' or jsonb_array_length(j->'conversation') < 2 then raise exception 'F6 fail: export'; end if;
+  raise notice 'F6 pass: backup export';
+end $$;
 rollback;

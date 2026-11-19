@@ -1,6 +1,6 @@
 // Author's Room worker (Supabase Edge Function).
 // Called every minute by pg_cron (x-worker-token) and immediately by the app after an
-// author action (author's JWT). Claims queued jobs and runs them until ~40 s have passed.
+// author action (author's JWT). Starts queued jobs during the first 15 s of each call.
 import { createClient, SupabaseClient } from 'npm:@supabase/supabase-js@2';
 import { generate, PolicyError, QuotaExhaustedError } from './ai.ts';
 import * as R from './roles.ts';
@@ -114,6 +114,18 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const r = await generate(db, { ...base, system: R.interviewer.system, jsonSchema: R.interviewer.schema,
       prompt: `ORIGINAL IDEA (verbatim):\n${cons!.original_idea}\n\nCURRENT BRIEF:\n${JSON.stringify(cons!.brief)}\n\nCONVERSATION:\n${convo}` });
     const out = parse(r.text);
+    // Safety net: never trap the author in the interview. Move on when the author asks to,
+    // or after three team questions, even if the model still wants more.
+    const authorMsgs = (msgs ?? []).filter((m: any) => m.role === 'author');
+    const asked = (msgs ?? []).filter((m: any) => m.role === 'assistant').length;
+    const lastAuthor = authorMsgs.at(-1)?.content ?? '';
+    const wantsToMoveOn = /\b(propose|proceed|go ahead|move on|skip|directions|enough questions|just start|use defaults?)\b/i.test(lastAuthor);
+    const forced = !out.ready && asked >= 1 && (wantsToMoveOn || asked >= 3);
+    if (forced) {
+      out.ready = true;
+      const gaps = (out.missing ?? []).length ? ` I'll use sensible defaults for: ${out.missing.join(', ')} — you can change any of them when you review the constitution.` : '';
+      out.reply = `Thank you — that's enough for the team to start.${gaps} The team will now propose directions for your book.`;
+    }
     await db.from('book_constitutions').update({ brief: out.brief, missing: out.missing ?? [] }).eq('id', cons!.id);
     await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant', content: out.reply });
     if (out.ready) {
@@ -122,7 +134,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       if (!count) await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'genre', p_step: 'directions',
                                              p_role: 'genre_strategist', p_priority: 94, p_payload: {} });
     }
-    return { ready: out.ready, missing: out.missing };
+    return { ready: out.ready, missing: out.missing, forced };
   }
 
   if (key === 'genre/directions') {
@@ -199,6 +211,8 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
   if (key === 'paragraph/review') {
     const { block_id, block_version_id, loop } = job.payload;
     const meta = R.LAYER1[job.role_code];
+    const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
+    if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
     const ctx = await bookContext(db, job.book_id);
     const prev = await manuscriptSoFar(db, job.book_id, block_id);
     const { data: v } = await db.from('block_versions').select('text').eq('id', block_version_id).single();
@@ -224,6 +238,8 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
 
   if (key === 'paragraph/consolidate') {
     const { block_id, block_version_id } = job.payload, loop = Number(job.payload.loop ?? 0);
+    const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
+    if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
     const [{ data: runs }, { data: issues }, { data: v }] = await Promise.all([
       db.from('review_runs').select('role_code, score, summary').eq('block_version_id', block_version_id),
       db.from('editorial_issues').select('id, raised_by, severity, category, issue, evidence, suggested_fix').eq('block_version_id', block_version_id),

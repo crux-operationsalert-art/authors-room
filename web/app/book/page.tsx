@@ -20,6 +20,7 @@ function Workspace() {
   const sb = supabaseBrowser();
   const [book, setBook] = useState<any>(null);
   const [msgs, setMsgs] = useState<Msg[]>([]);
+  const sending = useRef(false);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [cons, setCons] = useState<any>(null);
   const [ents, setEnts] = useState<any[]>([]);
@@ -34,6 +35,7 @@ function Workspace() {
   const chatEnd = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     const [b, m, d, c, e, bl, is, rv, j] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
@@ -58,14 +60,45 @@ function Workspace() {
     }
     ch.subscribe();
     const poll = setInterval(load, 20_000);   // safety net if realtime drops
-    return () => { sb.removeChannel(ch); clearInterval(poll); };
+    const back = () => { setErr(null); load(); };
+    window.addEventListener('online', back);
+    return () => { sb.removeChannel(ch); clearInterval(poll); window.removeEventListener('online', back); };
   }, [sb, id, load]);
   useEffect(() => { chatEnd.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs.length]);
 
-  async function run<T>(p: PromiseLike<{ error: any; data?: T }>) {
-    setErr(null);
-    const { error } = await p;
-    if (error) setErr(error.message); else { kick(); load(); }
+  const OFFLINE_MSG = 'Could not reach the server. Check your internet and try again; nothing was lost.';
+  const friendly = (m?: string) => (!m || /fetch|network|load failed|internet|ERR_/i.test(m)) ? OFFLINE_MSG : m;
+  // One action at a time: a double click or double tap never sends twice.
+  async function run<T>(p: PromiseLike<{ error: any; data?: T }>): Promise<boolean> {
+    if (sending.current) return false;
+    sending.current = true; setErr(null);
+    try {
+      const { error } = await p;
+      if (error && !/already (decided|approved)/i.test(error.message)) { setErr(friendly(error.message)); return false; }
+      kick(); load(); return true;
+    } catch {
+      setErr(OFFLINE_MSG); return false;
+    } finally { sending.current = false; }
+  }
+
+  function save(name: string, content: string, type: string) {
+    const url = URL.createObjectURL(new Blob([content], { type }));
+    const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+  async function downloadBackup() {
+    let data: any, error: any;
+    try { ({ data, error } = await app().rpc('export_book', { p_book: id })); } catch (e) { error = e; }
+    if (error) { setErr(friendly(error.message)); return; }
+    save(`${book.working_title.replace(/[^\w\- ]+/g, '')} backup ${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2), 'application/json');
+  }
+  function downloadManuscript() {
+    const approved = blocks.filter(b => b.status === 'author_approved' && b.block_versions);
+    const pending = blocks.filter(b => b.status !== 'author_approved' && b.block_versions);
+    const text = `# ${book.working_title}\n\n` + approved.map(b => b.block_versions!.text).join('\n\n') +
+      (pending.length ? `\n\n---\nNot yet approved:\n\n` + pending.map(b => `[${b.status}] ${b.block_versions!.text}`).join('\n\n') : '') +
+      `\n\n---\nAI-use note: paragraphs were drafted by AI (Gemini) and reviewed by AI reviewers; approved by the author.\n`;
+    save(`${book.working_title.replace(/[^\w\- ]+/g, '')}.md`, text, 'text/markdown');
   }
 
   if (!book) return <main style={page}><Header /><p>Loading…</p></main>;
@@ -81,9 +114,18 @@ function Workspace() {
     <main style={page}>
       <Header><span style={{ fontSize: 13, color: C.muted }}>{book.working_title} · {book.status}</span></Header>
       {err && <p role="alert" style={{ ...card, borderColor: C.bad, color: C.bad }}>{err}</p>}
-      <p style={{ fontSize: 13, color: busy ? C.warn : C.muted, margin: '0 0 12px' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+        <button style={btn} onClick={downloadBackup}>Download backup (.json)</button>
+        <button style={btn} onClick={downloadManuscript} disabled={!blocks.some(b => b.block_versions)}>Download manuscript (.md)</button>
+      </div>
+      <p style={{ fontSize: 13, color: busy ? C.warn : C.muted, margin: '0 0 4px' }}>
         {busy ? `The team is working (${activeJobs.length} task${activeJobs.length > 1 ? 's' : ''}${waiting ? `, ${waiting} waiting for quota` : ''})…` : 'The team is idle.'}
       </p>
+      {busy && (
+        <ul style={{ fontSize: 13, color: C.muted, margin: '0 0 12px', paddingLeft: 18 }}>
+          {activeJobs.map((j, i) => <li key={i}>{({ chief_editor: 'Chief Editor', author_interviewer: 'Interviewer', genre_strategist: 'Genre Strategist', story_architect: 'Story Architect', lead_writer: 'Lead Writer', voice_custodian: 'Voice reviewer', continuity_manager: 'Continuity reviewer', logic_fact_checker: 'Logic & fact reviewer', line_copy_editor: 'Language reviewer', reader_panel_manager: 'Simulated reader' } as Record<string, string>)[j.role_code] ?? j.role_code}: {j.step.replace('_', ' ')} — {j.status === 'running' ? 'working now' : j.status === 'waiting_quota' ? 'waiting for Google’s quota to refill' : 'queued'}</li>)}
+        </ul>
+      )}
       {failed.length > 0 && (
         <div style={{ ...card, borderColor: C.bad }}>
           <b style={{ color: C.bad }}>{failed.length} step{failed.length > 1 ? 's' : ''} could not finish</b>
@@ -92,7 +134,7 @@ function Workspace() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.25fr)', gap: 16, alignItems: 'start' }}>
+      <div className="two-col wide">
         {/* ---------- left: conversation + decisions ---------- */}
         <section>
           <div style={{ ...card, maxHeight: 460, overflowY: 'auto' }}>
@@ -107,11 +149,17 @@ function Workspace() {
             <div ref={chatEnd} />
           </div>
           {book.status === 'intake' && !genreDecision && (
-            <form onSubmit={e => { e.preventDefault(); if (!text.trim()) return; run(app().rpc('send_intake_message', { p_book: id, p_text: text })); setText(''); }}
+            <form onSubmit={e => { e.preventDefault(); if (!text.trim()) return; const t = text; setText(''); run(app().rpc('send_intake_message', { p_book: id, p_text: t })).then(ok => { if (!ok) setText(t); }); }}
                   style={{ display: 'flex', gap: 8 }}>
               <input style={input} placeholder="Reply to the team…" value={text} onChange={e => setText(e.target.value)} aria-label="Reply" />
               <button style={btnPrimary}>Send</button>
             </form>
+          )}
+          {book.status === 'intake' && !genreDecision && msgs.some(m => m.role === 'assistant') && (
+            <button type="button" style={{ ...btn, marginTop: 6 }}
+              onClick={() => run(app().rpc('send_intake_message', { p_book: id, p_text: 'That is enough questions — please use sensible defaults and propose directions now.' }))}>
+              Enough questions — propose directions
+            </button>
           )}
 
           {genreDecision && (
