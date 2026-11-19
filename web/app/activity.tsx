@@ -91,7 +91,7 @@ export function ActivityPanel({ jobs, runs, next }: { jobs: Job[]; runs: Run[]; 
 
       {next && (
         <div style={{ margin: '10px 0', padding: '10px 12px', borderRadius: 8,
-          background: next.who === 'you' ? '#fff8c5' : '#ddf4ff', border: `1px solid ${next.who === 'you' ? C.warn : C.accent}` }}>
+          background: next.who === 'you' ? '#fff8c5' : '#ddf4ff', borderWidth: 1, borderStyle: 'solid', borderColor: next.who === 'you' ? C.warn : C.accent }}>
           <b>{next.who === 'you' ? 'Your turn: ' : 'Team’s turn: '}</b>{next.text}
           {next.target && <button style={{ ...btn, marginLeft: 8, padding: '2px 10px', fontSize: 13 }}
             onClick={() => document.getElementById(next.target!)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>Show me</button>}
@@ -128,7 +128,7 @@ export function ActivityPanel({ jobs, runs, next }: { jobs: Job[]; runs: Run[]; 
         </div>
       )}
 
-      <button style={{ background: 'none', border: 0, padding: 0, color: C.accent, cursor: 'pointer', fontSize: 13, marginTop: 6 }}
+      <button style={{ background: 'none', borderWidth: 0, padding: 0, color: C.accent, cursor: 'pointer', fontSize: 13, marginTop: 6 }}
         onClick={() => setOpen(!open)}>{open ? '▾' : '▸'} Recent steps ({done.length})</button>
       {open && done.length > 0 && (
         <ol style={{ listStyle: 'none', padding: 0, margin: '6px 0 0', fontSize: 13 }}>
