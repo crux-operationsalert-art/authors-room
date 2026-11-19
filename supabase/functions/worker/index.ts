@@ -452,26 +452,42 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
 }
 
 // ------------------------------------------------------------------ admin actions
+const BACKUP_PROVIDERS = ['groq', 'mistral', 'openrouter'];
+const BACKUP_URL: Record<string, string> = { groq: 'https://api.groq.com/openai/v1', mistral: 'https://api.mistral.ai/v1', openrouter: 'https://openrouter.ai/api/v1' };
 async function checkKeys(db: SupabaseClient) {
-  const { data: keys } = await db.from('ai_keys').select('id, label, key_last4, status').order('label');
+  const { data: keys } = await db.from('ai_keys').select('id, label, key_last4, status, provider').order('label');
   const out = [];
   for (const k of keys ?? []) {
     const { data: secret } = await db.schema('app').rpc('get_key_secret', { p_key_id: k.id });
     if (!secret) { out.push({ label: k.label, ok: false, note: 'inactive' }); continue; }
-    const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': String(secret) } });
+    const gem = (k as any).provider === 'gemini';
+    const res = gem
+      ? await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': String(secret) } })
+      : await fetch(`${BACKUP_URL[(k as any).provider]}/models`, { headers: { Authorization: `Bearer ${secret}` } });
     const j = await res.json().catch(() => ({}));
-    const models = (j.models ?? []).map((m: any) => String(m.name).replace('models/', ''));
+    const models = gem ? (j.models ?? []).map((m: any) => String(m.name).replace('models/', ''))
+                       : (j.data ?? []).map((m: any) => String(m.id));
     const note = res.ok ? `valid · checked ${new Date().toISOString().slice(0, 16)}Z` : `invalid: ${j?.error?.message ?? res.status}`;
     await db.from('ai_keys').update({ notes: note }).eq('id', k.id);
-    out.push({ label: k.label, last4: k.key_last4, ok: res.ok, http: res.status, models: res.ok ? models : undefined, error: res.ok ? undefined : j?.error?.message });
+    out.push({ label: k.label, provider: (k as any).provider, last4: k.key_last4, ok: res.ok, http: res.status, models: res.ok ? models : undefined, error: res.ok ? undefined : j?.error?.message });
   }
   return { keys: out };
 }
 
 async function addKey(db: SupabaseClient, body: any) {
   const secret = String(body.secret ?? '').trim();
+  // Backup providers: recognised by the key's shape, or chosen on the Keys page.
+  const provider = String(body.provider ?? '') || (secret.startsWith('gsk_') ? 'groq' : secret.startsWith('sk-or-') ? 'openrouter'
+    : /^[A-Za-z0-9]{32}$/.test(secret) ? 'mistral' : 'gemini');
+  if (provider !== 'gemini') {
+    if (!BACKUP_PROVIDERS.includes(provider)) return { error: `Unknown provider "${provider}".` };
+    const { data, error } = await db.schema('app').rpc('admin_add_provider_key', { p_provider: provider, p_secret: secret });
+    if (error) return { error: error.message };
+    const row = (data as any[])?.[0];
+    return { label: row?.label, last4: row?.last4, provider };
+  }
   if (!/^AQ\.[A-Za-z0-9_\-]{20,}$/.test(secret)) return { error: 'That is not a Gemini auth key (they start with "AQ.")' };
-  const { count } = await db.from('ai_keys').select('id', { count: 'exact', head: true });
+  const { count } = await db.from('ai_keys').select('id', { count: 'exact', head: true }).eq('provider', 'gemini');
   const label = `K${String((count ?? 0) + 1).padStart(2, '0')}`;
   const { error } = await db.schema('app').rpc('admin_add_ai_key', { p_label: label, p_secret: secret, p_team_code: body.team || null, p_notes: null });
   if (error) return { error: error.message };

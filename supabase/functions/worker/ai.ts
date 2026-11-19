@@ -32,7 +32,7 @@ function parseRetry(msg: string): number {
 }
 const isDailyLimit = (msg: string) => /per ?day|PerDay|requests per day/i.test(msg);
 
-export async function generate(db: SupabaseClient, req: GenerateRequest): Promise<GenerateResult> {
+async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs = 100_000): Promise<GenerateResult> {
   const app = db.schema('app');
   const { data: project } = await db.from('ai_projects').select('id, usage_tier').eq('is_active', true).single();
   if (!project) throw new PolicyError('No active Gemini project.');
@@ -60,7 +60,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   const resting = new Map<string, number>(((rest ?? []) as any[]).map(r => [String(r.model_id), Date.parse(r.until)]));
   const live = chain.filter(m => !resting.has(m.id));
   if (!live.length) {
-    const soonest = Math.min(...[...resting.values()]);
+    const soonest = Math.min(...chain.map(m => resting.get(m.id) ?? Infinity));
     throw new QuotaExhaustedError(`Every model for tier "${req.tier}" is resting until its daily reset`,
       Math.max(60, Math.min(86400, Math.ceil((soonest - Date.now()) / 1000))));
   }
@@ -105,7 +105,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   let busyElsewhere = false;                     // a model was busy/failed (not used up): worth retrying soon
   for (let mi = startAt; mi < live.length; mi++) {
     const m = live[mi];
-    if (mi > startAt && Date.now() - t_all > 100_000) break;         // stay inside the function's time limit
+    if (mi > startAt && Date.now() - t_all > budgetMs) break;         // stay inside the function's time limit
     const t0 = Date.now();
     let status = 0, json: any = {}, retryAfter = 0;
     try {
@@ -164,4 +164,130 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   if (quotaWait && !busyElsewhere) throw new QuotaExhaustedError(`Gemini daily free limits reached for every model in tier "${req.tier}"`, Math.min(quotaWait, 86400));
   if (quotaWait) throw new QuotaExhaustedError(`Main model used up for today and the backup models are busy; trying again in 2 minutes`, 120);
   throw new Error(`All models for tier "${req.tier}" are unavailable right now: ${lastMsg}`);
+}
+
+// ------------------------------------------------------------------ backup providers
+// Groq, Mistral and OpenRouter: separate companies, each giving one account its own free allowance under
+// its own terms. Used only when Gemini cannot answer (all models used up or busy). OpenAI-compatible APIs.
+const BACKUP_BASE: Record<string, string> = {
+  groq: 'https://api.groq.com/openai/v1',
+  mistral: 'https://api.mistral.ai/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+};
+
+export async function generate(db: SupabaseClient, req: GenerateRequest): Promise<GenerateResult> {
+  const t0 = Date.now();
+  const { data: bk } = await db.from('ai_keys').select('id, label, project_id, provider').neq('provider', 'gemini').eq('status', 'active');
+  const backups = (bk ?? []) as any[];
+  if (!backups.length) return generateGemini(db, req);
+  let first: unknown;
+  try { return await generateGemini(db, req, 55_000); }      // shorter Gemini budget leaves time for the backups
+  catch (e) { if (e instanceof PolicyError) throw e; first = e; }
+  const r = await generateBackup(db, req, backups, Math.max(25_000, 140_000 - (Date.now() - t0)));
+  if ('result' in r) return r.result;
+  // Nothing answered: retry when the soonest option is back (never later than Gemini's own wait).
+  const gWait = first instanceof QuotaExhaustedError ? first.retryAfterSeconds : 30;
+  throw new QuotaExhaustedError(`Gemini: ${(first as Error)?.message ?? first} | Backups: ${r.why}`,
+    Math.max(30, Math.min(gWait, r.retryIn)));
+}
+
+async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: any[], budgetMs: number):
+    Promise<{ result: GenerateResult } | { why: string; retryIn: number }> {
+  const app = db.schema('app');
+  const { data: cfgRow } = await app.from('settings').select('value').eq('key', 'backup_models').maybeSingle();
+  let cfg: any = {};
+  try { cfg = JSON.parse(String((cfgRow as any)?.value ?? '{}')); } catch { /* defaults below */ }
+  const order: string[] = cfg.order ?? ['mistral', 'groq', 'openrouter'];
+  const { data: rest } = await db.from('model_rest').select('model_id, until').gt('until', new Date().toISOString());
+  const resting = new Map<string, number>(((rest ?? []) as any[]).map(r => [String(r.model_id), Date.parse(r.until)]));
+  const restModel = (model_id: string, seconds: number, reason: string) => db.from('model_rest').upsert(
+    { model_id, until: new Date(Date.now() + seconds * 1000).toISOString(), reason, updated_at: new Date().toISOString() },
+    { onConflict: 'model_id' });
+  const promptHash = await sha256(req.system + '\u0000' + req.prompt);
+  const system = req.jsonSchema
+    ? `${req.system}\n\nReply with ONLY one JSON object (no markdown fences, no commentary) that matches this JSON Schema:\n${JSON.stringify(req.jsonSchema)}`
+    : req.system;
+  const required: string[] = ((req.jsonSchema as any)?.required ?? []) as string[];
+  const t0 = Date.now();
+  let soonest = Infinity;
+  const why: string[] = [];
+
+  for (const provider of order) {
+    const key = keys.find(k => k.provider === provider);
+    if (!key || !BACKUP_BASE[provider]) continue;
+    const provRest = resting.get(`${provider}:*`);
+    if (provRest) { soonest = Math.min(soonest, provRest); why.push(`${provider} resting`); continue; }
+    const { data: secret } = await app.rpc('get_key_secret', { p_key_id: key.id });
+    if (!secret) continue;
+    const record = (r: Record<string, unknown>) => db.from('agent_runs').insert({
+      job_id: req.jobId ?? null, book_id: req.bookId ?? null, role_code: req.roleCode, team_code: req.teamCode,
+      key_id: key.id, project_id: key.project_id, prompt_hash: promptHash, prompt_version: req.promptVersion ?? null, ...r });
+
+    for (const model of (cfg[provider] ?? []) as string[]) {
+      const id = `${provider}:${model}`;
+      const until = resting.get(id);
+      if (until) { soonest = Math.min(soonest, until); continue; }
+      const remaining = budgetMs - (Date.now() - t0);
+      if (remaining < 10_000) { why.push('out of time'); return { why: why.join('; '), retryIn: 30 }; }
+      const payload: any = {
+        model, temperature: req.temperature ?? 0.7,
+        max_tokens: Math.min(Math.max(req.maxOutputTokens ?? 3000, 1500), 6000),
+        messages: [{ role: 'system', content: system }, { role: 'user', content: req.prompt }],
+      };
+      if (req.jsonSchema) payload.response_format = { type: 'json_object' };
+      if (provider === 'groq' && model.startsWith('openai/gpt-oss')) payload.reasoning_effort = 'low';
+      const t1 = Date.now();
+      let status = 0, json: any = {}, retryAfter = 0;
+      try {
+        const res = await fetch(`${BACKUP_BASE[provider]}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}`,
+                     ...(provider === 'openrouter' ? { 'X-Title': "Author's Room" } : {}) },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(Math.min(50_000, remaining - 5_000)),
+        });
+        status = res.status; retryAfter = Number(res.headers.get('retry-after')) || 0;
+        json = await res.json().catch(() => ({}));
+      } catch (e) { json = { error: { message: String(e) } }; }
+      const latency_ms = Date.now() - t1;
+      const label = `${provider}/${model}`;
+
+      if (status === 200) {
+        let text = String(json?.choices?.[0]?.message?.content ?? '').trim();
+        text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+        const inTok = json?.usage?.prompt_tokens ?? 0, outTok = json?.usage?.completion_tokens ?? 0;
+        let err: string | null = null;
+        if (!text) err = `empty reply (finish=${json?.choices?.[0]?.finish_reason ?? 'unknown'})`;
+        else if (req.jsonSchema) {
+          try {
+            const o = JSON.parse(text);
+            const missing = required.filter(k => !(k in o));
+            if (missing.length) err = `JSON missing ${missing.join(', ')}`;
+          } catch { err = 'invalid JSON'; }
+        }
+        await record({ model_id: label, input_tokens: inTok, output_tokens: outTok, cost_estimate: 0, latency_ms,
+                       status: err ? (err.startsWith('empty') ? 'error' : 'schema_invalid') : 'ok', http_status: 200, error: err });
+        if (err) { why.push(`${label}: ${err}`); continue; }
+        return { result: { text, modelId: label, inputTokens: inTok, outputTokens: outTok, costEstimate: 0, keyLabel: key.label } };
+      }
+      const msg = String(json?.error?.message ?? json?.message ?? json?.detail ?? `HTTP ${status}`).slice(0, 500);
+      await record({ model_id: label, latency_ms, status: status === 429 ? 'rate_limited' : 'error', http_status: status || null, error: msg });
+      why.push(`${label}: ${status || 'no answer'}`);
+      if (status === 429) {
+        const daily = /per day|RPD|TPD|daily|free-models-per-day/i.test(msg);
+        const secs = Math.max(20, retryAfter || parseRetry(msg) || (daily ? 3600 : 60));
+        await restModel(id, secs, daily ? 'daily free limit used up' : 'busy (per-minute limit)');
+        soonest = Math.min(soonest, Date.now() + secs * 1000);
+        continue;
+      }
+      if (status === 401 || status === 403) {      // key rejected or plan not allowed: skip this provider for an hour
+        await restModel(`${provider}:*`, 3600, `key rejected (HTTP ${status})`);
+        break;
+      }
+      if (status === 404) await restModel(id, 7 * 86400, 'model not available');
+      // 400/413/422 (request too large for this model), 5xx, timeouts: try the next model
+    }
+  }
+  return { why: why.join('; ') || 'no backup model available',
+           retryIn: soonest === Infinity ? 60 : Math.max(30, Math.ceil((soonest - Date.now()) / 1000)) };
 }

@@ -42,6 +42,7 @@ export default function KeysPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [newKey, setNewKey] = useState('');
   const [newTeam, setNewTeam] = useState('');
+  const [newProv, setNewProv] = useState('gemini');
   const [models, setModels] = useState<any[]>([]);
 
   const load = useCallback(async () => {
@@ -84,13 +85,16 @@ export default function KeysPage() {
   }
   async function addKey(e: React.FormEvent) {
     e.preventDefault();
-    const { data: j, error } = await callWorker({ action: 'add_key', secret: newKey, team: newTeam || null });
+    const { data: j, error } = await callWorker({ action: 'add_key', secret: newKey.trim(), team: newProv === 'gemini' ? newTeam || null : null,
+                                                  provider: newProv === 'gemini' ? undefined : newProv });
     setNewKey('');
-    setMsg(error ? error.message : j.error ? j.error : `Added ${j.label} (••••${j.last4})${j.team ? ` for ${j.team}` : ' as standby'}.`);
+    setMsg(error ? error.message : j.error ? j.error : j.provider
+      ? `Added ${j.label} (••••${j.last4}) as a backup. It takes over automatically whenever Gemini runs out.`
+      : `Added ${j.label} (••••${j.last4})${j.team ? ` for ${j.team}` : ' as standby'}.`);
     load();
   }
   async function checkKeys() {
-    setMsg('Checking every key with Google…');
+    setMsg('Checking every key with its provider…');
     const { data: j, error } = await callWorker({ action: 'check_keys' });
     if (error) { setMsg(error.message); return; }
     const bad = (j.keys ?? []).filter((k: any) => !k.ok);
@@ -118,6 +122,8 @@ export default function KeysPage() {
         share one allowance; using more of them would not add any. K03 to K21 belong to other Google projects. They are kept on
         standby and are not used to get round the main project's limit, because that breaks Google's terms and could get the
         projects suspended. To remove the limit, turn on billing for the main project in Google AI Studio.
+        <br /><b>Backups:</b> when every Gemini model is used up or busy, the team carries on with Mistral, Groq or OpenRouter
+        (each from its own free account, in that order). Add their keys at the bottom of this page.
       </div>
 
       <h2>Models — what each one did today</h2>
@@ -208,17 +214,28 @@ export default function KeysPage() {
 
       <h2>Add a key</h2>
       <p style={{ color: '#59636e' }}>
-        Use this to give a team its own key or to replace a revoked one. Only add keys from this app’s one Gemini project;
-        keys from other projects must not be used to stretch quota (Google’s terms and the project brief). The key goes straight to encrypted
-        storage; only its last four characters are shown.
+        <b>Gemini:</b> only keys from this app’s one Gemini project; keys from other projects must not be used to stretch quota
+        (Google’s terms and the project brief). <b>Backup providers</b> (one free account each, under that company’s own terms):
+        {' '}<a href="https://console.mistral.ai/api-keys" target="_blank" rel="noreferrer">Mistral</a> (best writing; free plan needs phone
+        verification and lets Mistral learn from what you send),
+        {' '}<a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Groq</a> (fast, small daily token allowance),
+        {' '}<a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer">OpenRouter</a> (50 free requests a day).
+        The key goes straight to encrypted storage; only its last four characters are shown.
       </p>
       <form onSubmit={addKey} style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <input type="password" autoComplete="off" placeholder="AQ.…" value={newKey} onChange={e => setNewKey(e.target.value)}
-               style={{ flex: '1 1 360px', padding: 6 }} aria-label="Gemini auth key" required />
-        <select value={newTeam} onChange={e => setNewTeam(e.target.value)} aria-label="Assign to team">
+        <select value={newProv} onChange={e => setNewProv(e.target.value)} aria-label="Provider">
+          <option value="gemini">Gemini (main project)</option>
+          <option value="mistral">Mistral (backup)</option>
+          <option value="groq">Groq (backup)</option>
+          <option value="openrouter">OpenRouter (backup)</option>
+        </select>
+        <input type="password" autoComplete="off" placeholder={{ gemini: 'AQ.…', mistral: 'Mistral API key', groq: 'gsk_…', openrouter: 'sk-or-…' }[newProv]}
+               value={newKey} onChange={e => setNewKey(e.target.value)}
+               style={{ flex: '1 1 360px', padding: 6 }} aria-label="API key" required />
+        {newProv === 'gemini' && <select value={newTeam} onChange={e => setNewTeam(e.target.value)} aria-label="Assign to team">
           <option value="">Standby (no team)</option>
           {teams.map(t => <option key={t.team_code} value={t.team_code}>{t.team}</option>)}
-        </select>
+        </select>}
         <button type="submit">Add key</button>
       </form>
     </main>
