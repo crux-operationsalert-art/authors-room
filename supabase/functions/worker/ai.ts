@@ -51,9 +51,22 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   const { data: model } = await db.from('model_registry')
     .select('model_id, input_price_per_mtok, output_price_per_mtok, fallbacks').eq('tier', req.tier).eq('enabled', true).single();
   if (!model) throw new PolicyError(`No enabled model for tier "${req.tier}".`);
-  // Fallbacks are used ONLY when a model is unavailable (5xx / timeout), never on quota (429).
+  // Fallbacks are used when a model is unavailable (5xx / timeout / 404) or its own DAILY limit is used up.
   const chain = [{ id: model.model_id, pin: Number(model.input_price_per_mtok), pout: Number(model.output_price_per_mtok) },
     ...((model.fallbacks ?? []) as any[]).map(f => ({ id: String(f.model_id), pin: Number(f.in ?? 0), pout: Number(f.out ?? 0) }))];
+
+  // Skip models that are resting (daily limit used up, or retired) until their reset.
+  const { data: rest } = await db.from('model_rest').select('model_id, until').gt('until', new Date().toISOString());
+  const resting = new Map<string, number>(((rest ?? []) as any[]).map(r => [String(r.model_id), Date.parse(r.until)]));
+  const live = chain.filter(m => !resting.has(m.id));
+  if (!live.length) {
+    const soonest = Math.min(...[...resting.values()]);
+    throw new QuotaExhaustedError(`Every model for tier "${req.tier}" is resting until its daily reset`,
+      Math.max(60, Math.min(86400, Math.ceil((soonest - Date.now()) / 1000))));
+  }
+  const restModel = (model_id: string, seconds: number, reason: string) => db.from('model_rest').upsert(
+    { model_id, until: new Date(Date.now() + seconds * 1000).toISOString(), reason, updated_at: new Date().toISOString() },
+    { onConflict: 'model_id' });
 
   const { data: keyRows } = await app.rpc('resolve_key_for_team', { p_team_code: req.teamCode });
   const key = (keyRows as any[])?.[0];
@@ -62,11 +75,11 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   if (!secret) throw new PolicyError(`Key ${key.label} has no readable secret.`);
 
   const est = Math.ceil((req.system.length + req.prompt.length) / 4);
-  const { data: wait } = await app.rpc('quota_gate', { p_model: chain[0].id, p_est_tokens: est });
-  // Main model resting (its limit is used up): go straight to the backups instead of waiting, if there are any.
+  const { data: wait } = await app.rpc('quota_gate', { p_model: live[0].id, p_est_tokens: est });
+  // First model at its limit: go straight to the next ones instead of waiting, if there are any.
   let startAt = 0;
   if (Number(wait) > 0) {
-    if (chain.length < 2) throw new QuotaExhaustedError(`Project quota for ${chain[0].id} is used up for now.`, Number(wait));
+    if (live.length < 2) throw new QuotaExhaustedError(`Project quota for ${live[0].id} is used up for now.`, Number(wait));
     startAt = 1;
   }
 
@@ -90,16 +103,16 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
   let lastMsg = '';
   let quotaWait = startAt ? Number(wait) : 0;   // set when a model's DAILY free limit is used up and we moved on
   let busyElsewhere = false;                     // a model was busy/failed (not used up): worth retrying soon
-  for (let mi = startAt; mi < chain.length; mi++) {
-    const m = chain[mi];
-    if (mi > startAt && Date.now() - t_all > 60_000) break;          // stay inside the function's time limit
+  for (let mi = startAt; mi < live.length; mi++) {
+    const m = live[mi];
+    if (mi > startAt && Date.now() - t_all > 100_000) break;         // stay inside the function's time limit
     const t0 = Date.now();
     let status = 0, json: any = {}, retryAfter = 0;
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m.id)}:generateContent`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': String(secret) },
         body: JSON.stringify({ ...body, generationConfig: { ...body.generationConfig, ...(thinkingFor(m.id) ? { thinkingConfig: thinkingFor(m.id) } : {}) } }),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(mi === startAt ? 60_000 : 35_000),   // later models get less time so more of them can be tried
       });
       status = res.status; retryAfter = Number(res.headers.get('retry-after')) || 0;
       json = await res.json().catch(() => ({}));
@@ -121,7 +134,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
       if (req.jsonSchema) { try { JSON.parse(text); } catch { st = 'schema_invalid'; } }
       await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: st, http_status: 200,
                      error: st === 'ok' ? null : `finish=${json?.candidates?.[0]?.finishReason}; starts: ${text.slice(0, 150)}` });
-      if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; busyElsewhere = true; if (mi < chain.length - 1) continue; throw new Error('Model output was not valid JSON for the role schema.'); }
+      if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; busyElsewhere = true; if (mi < live.length - 1) continue; throw new Error('Model output was not valid JSON for the role schema.'); }
       return { text, modelId: m.id, inputTokens: inTok, outputTokens: outTok, costEstimate: cost, keyLabel: key.label };
     }
     const msg = json?.error?.message ?? `HTTP ${status}`;
@@ -131,7 +144,8 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
       const wait = retryAfter || parseRetry(msg) || 60;
       // Never switch KEYS on quota: every key in the project shares it. A model's DAILY limit is its own,
       // so the next model in the chain (with its own allowance in the same project) may still work today.
-      if (isDailyLimit(msg) && mi < chain.length - 1) {
+      if (isDailyLimit(msg)) await restModel(m.id, wait, 'daily free limit used up');
+      if (isDailyLimit(msg) && mi < live.length - 1) {
         quotaWait = quotaWait ? Math.min(quotaWait, wait) : wait;
         continue;
       }
@@ -140,6 +154,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
     await record({ model_id: m.id, latency_ms, status: 'error', http_status: status || null, error: msg });
     // 5xx, timeouts and 404 (model retired for this project) move on to the next model; other errors stop.
     if (!(status === 0 || status >= 500 || status === 404)) throw new Error(`Gemini call failed (HTTP ${status}): ${msg}`);
+    if (status === 404) await restModel(m.id, 7 * 86400, 'not available to this project');
     if (status !== 404) busyElsewhere = true;
     await sleep(1500);   // brief pause, then the next model in the chain
   }

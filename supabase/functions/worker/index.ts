@@ -60,6 +60,11 @@ Deno.serve(async (req) => {
       done.push({ id: job.id, step: `${job.workflow}/${job.step}`, ok: false, error: String((e as Error).message ?? e) });
     }
   }
+  // Non-stop: let autopilot act on what just finished, then start the next step at once if work is ready.
+  if (done.length) {
+    await app.rpc('autopilot_tick_safe');
+    await app.rpc('kick_worker');
+  }
   return json({ done });
 });
 
@@ -256,8 +261,9 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       const blk = all[c.paragraph - 1];
       if (blk.id !== block_id) await db.from('author_notes').insert({ book_id: job.book_id, block_id: blk.id, scope: 'paragraph',
         note: `(from your note on paragraph ${idx + 1}) ${c.instruction}` });
-      await app.rpc('reopen_for_feedback', { p_block: blk.id, p_note: note_id, p_priority: 93 - k,
+      const { error: reErr } = await app.rpc('reopen_for_feedback', { p_block: blk.id, p_note: note_id, p_priority: 93 - k,
         p_instruction: `Author's note on paragraph ${idx + 1}: "${note.note}"\nWhat THIS paragraph (${c.paragraph}) must achieve: ${c.instruction}` });
+      if (reErr) throw new Error(`Could not reopen paragraph ${c.paragraph}: ${reErr.message}`);
       // one at a time, in reading order, so each revision sees its neighbour's new text
       if (k > 0) await db.from('agent_jobs').update({ run_after: new Date(Date.now() + k * 180_000).toISOString() })
         .eq('step', 'revise').eq('status', 'queued').eq('payload->>block_id', blk.id);
@@ -280,7 +286,11 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const prev = around.before;
     const authorDirs = await directions(db, job.book_id, blockId);
     const { data: blk } = await db.from('manuscript_blocks').select('id, unit_id, current_version_id, block_versions!manuscript_blocks_current_fk(text)').eq('id', blockId).single();
-    const current = (blk as any)?.block_versions?.text;
+    let current = (blk as any)?.block_versions?.text;
+    if (job.payload.base_version_id) {   // autopilot revises from the best-scoring version so far
+      const { data: bv } = await db.from('block_versions').select('text').eq('id', job.payload.base_version_id).maybeSingle();
+      if (bv?.text) current = bv.text;
+    }
     // chapter context: which chapter this paragraph belongs to, its plan and how far along it is
     let chapterText = '';
     if ((blk as any)?.unit_id) {
@@ -394,8 +404,11 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       db.from('block_versions').select('text').eq('id', block_version_id).single(),
     ]);
     const authorDirs = await directions(db, job.book_id, block_id);
+    const { data: bk } = await db.from('books').select('autopilot, autopilot_threshold').eq('id', job.book_id).single();
+    const bar = bk?.autopilot ? `THE AUTHOR'S BAR: a paragraph is approved only with an overall score above ${bk.autopilot_threshold}/100. ` +
+      `Score honestly: give a score above ${bk.autopilot_threshold} only when nothing worth fixing remains. Your instructions must say exactly what would lift it over the bar.\n\n` : '';
     const r = await generate(db, { ...base, system: R.consolidate.system, jsonSchema: R.consolidate.schema, temperature: 0.2,
-      prompt: authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
+      prompt: bar + authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
     const o = parse(r.text);
     const blocking = (issues ?? []).some((i: any) => i.severity === 'critical' || i.severity === 'major');
     // A critical/major issue always forces revision; otherwise only a weak overall score does (minor notes are kept for the author).
@@ -405,7 +418,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'revise', p_role: 'lead_writer',
         p_priority: 90, p_payload: { block_id, instructions: o.instructions, loop: loop + 1 } });
       await db.from('editorial_issues').update({ status: 'accepted' }).eq('block_version_id', block_version_id).in('severity', ['critical', 'major']);
-      return { decision: 'revise', loop: loop + 1, score: o.overall_score };
+      return { decision: 'revise', loop: loop + 1, score: o.overall_score, instructions: o.instructions, summary: o.summary };
     }
     if (revise) {
       // two loops used: the author decides (Brief: no silent acceptance)
@@ -415,13 +428,13 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
         recommendation: o.summary + (o.disagreements ? `\nReviewers disagreed: ${o.disagreements}` : '') });
       await app.rpc('set_block_status', { p_block_id: block_id, p_status: 'qc_passed' });
       await note(db, job.book_id, 'A paragraph needs your decision: the team could not clear every serious issue in two revisions.');
-      return { decision: 'escalated', score: o.overall_score };
+      return { decision: 'escalated', score: o.overall_score, instructions: o.instructions, summary: o.summary };
     }
     await app.rpc('set_block_status', { p_block_id: block_id, p_status: 'qc_passed' });
     await db.from('editorial_issues').update({ status: 'deferred' }).eq('block_version_id', block_version_id).eq('status', 'open');
     await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'extract_facts', p_role: 'continuity_manager',
       p_priority: 70, p_payload: { block_id, block_version_id } });
-    return { decision: 'pass', score: o.overall_score };
+    return { decision: 'pass', score: o.overall_score, instructions: o.instructions, summary: o.summary };
   }
 
   if (key === 'paragraph/extract_facts') {

@@ -42,6 +42,7 @@ export default function KeysPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [newKey, setNewKey] = useState('');
   const [newTeam, setNewTeam] = useState('');
+  const [models, setModels] = useState<any[]>([]);
 
   const load = useCallback(async () => {
     const [k, t, q] = await Promise.all([
@@ -49,6 +50,23 @@ export default function KeysPage() {
       sb.from('v_team_usage').select('*'),
       sb.from('v_project_quota').select('*'),
     ]);
+    // per-model use today (Pacific day, as Google counts it) and which models are resting until their reset
+    const dayStart = new Date(); const pt = new Date(dayStart.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+    const since = new Date(Date.now() - ((pt.getHours() * 60 + pt.getMinutes()) * 60 + pt.getSeconds()) * 1000).toISOString();
+    const [runs, rest, reg] = await Promise.all([
+      sb.from('agent_runs').select('model_id, status').gte('created_at', since).limit(5000),
+      sb.from('model_rest').select('model_id, until, reason'),
+      sb.from('model_registry').select('tier, model_id, fallbacks').eq('enabled', true),
+    ]);
+    const ids = new Set<string>();
+    for (const r of (reg.data ?? []) as any[]) { ids.add(r.model_id); for (const f of r.fallbacks ?? []) ids.add(f.model_id); }
+    ids.delete('gemini-embedding-001');
+    setModels([...ids].map(id => {
+      const rr = ((runs.data ?? []) as any[]).filter(x => x.model_id === id);
+      const rs = ((rest.data ?? []) as any[]).find(x => x.model_id === id && Date.parse(x.until) > Date.now());
+      return { id, ok: rr.filter(x => x.status === 'ok').length, refused: rr.filter(x => x.status === 'rate_limited').length,
+               busy: rr.filter(x => x.status === 'error').length, rest: rs };
+    }).sort((a, b) => b.ok - a.ok));
     if (k.error || t.error || q.error) setMsg((k.error ?? t.error ?? q.error)!.message);
     setKeys((k.data ?? []) as KeyRow[]); setTeams((t.data ?? []) as TeamRow[]); setQuota((q.data ?? []) as QuotaRow[]);
   }, [sb]);
@@ -94,6 +112,29 @@ export default function KeysPage() {
         identity, so you can see who used what and revoke one key without stopping the rest. Refreshes every 15 seconds.
       </p>
       {msg && <p role="status" style={{ background: '#ddf4ff', padding: 8, borderRadius: 6 }}>{msg}</p>}
+
+      <div style={{ background: '#fff8c5', border: '1px solid #9a6700', borderRadius: 8, padding: '10px 12px', margin: '12px 0' }}>
+        <b>Why some keys look idle.</b> Google sets limits per <b>project</b>, not per key. K01, K02 and K12 are one project, so they
+        share one allowance; using more of them would not add any. K03 to K21 belong to other Google projects. They are kept on
+        standby and are not used to get round the main project's limit, because that breaks Google's terms and could get the
+        projects suspended. To remove the limit, turn on billing for the main project in Google AI Studio.
+      </div>
+
+      <h2>Models — what each one did today</h2>
+      <p style={{ color: '#59636e', marginTop: 0 }}>Each model has its own daily allowance in the main project. The team uses every one of them,
+        and a model whose allowance is used up rests until Google's daily reset (1:30 pm IST) instead of being asked again.</p>
+      <table style={{ borderCollapse: 'collapse', width: '100%', marginBottom: 16 }}>
+        <thead><tr>{['Model', 'Answers today', 'Refused (limit)', 'Busy / timed out', 'Now'].map(h =>
+          <th key={h} style={{ textAlign: 'left', borderBottom: '1px solid #d0d7de', padding: 6 }}>{h}</th>)}</tr></thead>
+        <tbody>{models.map(m => (
+          <tr key={m.id}>
+            <td style={{ padding: 6 }}>{m.id}</td><td style={{ padding: 6 }}>{m.ok}</td>
+            <td style={{ padding: 6 }}>{m.refused}</td><td style={{ padding: 6 }}>{m.busy}</td>
+            <td style={{ padding: 6, color: m.rest ? '#9a6700' : '#1a7f37' }}>{m.rest
+              ? `resting until ${new Date(m.rest.until).toLocaleString('en-IN', { weekday: 'short', hour: '2-digit', minute: '2-digit' })} (${m.rest.reason})`
+              : 'available'}</td>
+          </tr>))}</tbody>
+      </table>
 
       <h2>Project quota (shared by all keys)</h2>
       {quota.length === 0 && <p>No limits recorded yet. Copy them from AI Studio’s rate-limit page into <code>project_model_limits</code>.</p>}
