@@ -84,6 +84,9 @@ Books marked **Confidential** pause until the Gemini project is on a paid tier.
 
 ## Watch progress remotely
 
+- **Live app (phone or any computer):** https://crux-operationsalert-art.github.io/authors-room/ — sign in with your password.
+  To update it: `cd web && NEXT_PUBLIC_BASE_PATH=/authors-room npx next build`, add an empty `.nojekyll` to `out/`, and push `out/` to the `gh-pages` branch.
+
 - **Phone or any computer, read-only:** open the *Author's Room — progress* page in Claude (web or app). It reads your
   database through your Supabase connector and refreshes every minute. Source: `monitor/progress-page.html`.
 - **Full app from anywhere:** host the `web/out` folder (for example on Netlify, free), then add the site's address to
