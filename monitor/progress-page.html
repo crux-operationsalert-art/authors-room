@@ -83,11 +83,12 @@ const QUERY = `select jsonb_build_object(
  'models', (select coalesce(jsonb_agg(jsonb_build_object('model', model_id, 'ok', ok, 'limited', limited, 'errors', errors)), '[]') from (
    select model_id, count(*) filter (where status = 'ok') ok, count(*) filter (where status = 'rate_limited') limited,
           count(*) filter (where status in ('error','schema_invalid')) errors
-     from agent_runs where created_at >= app.pacific_day_start() group by model_id) m),
- 'reset_at', app.pacific_day_start() + interval '1 day',
- 'cron', (select jsonb_build_object('last', max(start_time), 'failed_1h', count(*) filter (where status <> 'succeeded' and start_time > now() - interval '1 hour'))
-   from cron.job_run_details where start_time > now() - interval '1 day')
+     from agent_runs where created_at >= (date_trunc('day', now() at time zone 'America/Los_Angeles') at time zone 'America/Los_Angeles') group by model_id) m),
+ 'reset_at', (date_trunc('day', now() at time zone 'America/Los_Angeles') at time zone 'America/Los_Angeles') + interval '1 day'
 ) as r`;
+// Worker health is a separate, small query: if it fails, the rest of the page still shows.
+const HEALTH_QUERY = `select jsonb_build_object('last', max(start_time), 'failed_1h', count(*) filter (where status <> 'succeeded' and start_time > now() - interval '1 hour')) as r
+  from cron.job_run_details where start_time > now() - interval '1 day'`;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -137,16 +138,23 @@ function render(d) {
 
   const models = d.models ?? [];
   const limited = models.reduce((s, m) => s + m.limited, 0);
+  d.cron = lastCron;
   const cronOk = d.cron?.last && (Date.now() - Date.parse(d.cron.last) < 5 * 60000) && !d.cron.failed_1h;
   $('health').innerHTML = `<h2>Health</h2><div class="card">
-    <div class="row"><span class="pill ${cronOk ? 'ok' : 'bad'}">${cronOk ? 'Worker running' : 'Worker not running'}</span>
-      <span class="muted">last run ${ago(d.cron?.last)}</span></div>
+    <div class="row">${d.cron ? `<span class="pill ${cronOk ? 'ok' : 'bad'}">${cronOk ? 'Worker running' : 'Worker not running'}</span>
+      <span class="muted">last run ${ago(d.cron?.last)}</span>` : `<span class="muted">Worker check not available on this view${d.cronErr ? ` (${esc(d.cronErr)})` : ''}</span>`}</div>
     <table style="margin-top:8px"><tr><th>Model (today, Pacific day)</th><th>OK</th><th>Quota hits</th><th>Errors</th></tr>
       ${models.length ? models.map(m => `<tr><td>${esc(m.model)}</td><td>${m.ok}</td><td class="${m.limited ? 'warn' : ''}">${m.limited}</td><td class="${m.errors ? 'bad' : ''}">${m.errors}</td></tr>`).join('') : `<tr><td colspan="4" class="muted">No AI calls yet today.</td></tr>`}
     </table>
     <div class="muted" style="margin-top:6px">${limited ? 'Quota was reached today; waiting work resumes by itself. ' : ''}Daily quota resets ${ist(d.reset_at)} IST.</div></div>`;
 }
 
+let lastMain = null, lastCron = null, cronErr = null;
+const errText = (e) => {
+  const r = e?.result; let t = '';
+  try { t = (r?.content ?? []).map(b => b.text ?? '').join(' ') || (typeof r?.structuredContent === 'string' ? r.structuredContent : JSON.stringify(r?.structuredContent ?? '')); } catch {}
+  return String(t || e?.message || '').replace(/\s+/g, ' ').slice(0, 300);
+};
 function showState(html) { const s = $('state'); s.hidden = !html; s.innerHTML = html ?? ''; }
 
 (async () => {
@@ -157,7 +165,7 @@ function showState(html) { const s = $('state'); s.hidden = !html; s.innerHTML =
     if (unsub) unsub();
     unsub = mcp.watchTool('Supabase', 'execute_sql', { project_id: PROJECT, query: QUERY }, ev => {
       if (ev.type === 'data') {
-        try { render(parsePayload(ev.result)); showState(null);
+        try { lastMain = parsePayload(ev.result); render({ ...lastMain, cronErr }); showState(null);
               $('fresh').textContent = `Updated ${ago(new Date(ev.result.cache?.storedAt ?? Date.now()).toISOString())} · refreshes every minute`; }
         catch (e) { showState('Could not read the reply from Supabase. Pull to refresh in a minute.'); }
         return;
@@ -169,10 +177,22 @@ function showState(html) { const s = $('state'); s.hidden = !html; s.innerHTML =
         showState(`This page needs your permission to read your Author's Room database. <button id="allow">Allow and load</button>`);
         $('allow').onclick = async () => { try { const r = await mcp.callTool('Supabase', 'execute_sql', { project_id: PROJECT, query: QUERY }); render(parsePayload(r)); showState(null); start(); } catch (e) { showState(`Still not allowed (${esc(e.code)}).`); } };
       }
-      else showState(`Supabase did not answer just now (${esc(c ?? 'unknown')}). The last data shown is kept; it retries every minute.`);
+      else {
+        showState(`Supabase could not run the progress check (${esc(c ?? 'unknown')}).${errText(ev.error) ? `<br><span class="muted" style="font-size:13px">Details: ${esc(errText(ev.error))}</span>` : ''}
+          <br>The last data shown is kept and it retries every minute. <button id="again">Try again now</button>`);
+        const b = $('again'); if (b) b.onclick = async () => { b.disabled = true;
+          try { const r = await mcp.callTool('Supabase', 'execute_sql', { project_id: PROJECT, query: QUERY }); lastMain = parsePayload(r); render({ ...lastMain, cronErr }); showState(null); }
+          catch (e) { showState(`Still failing (${esc(e.code)}). Details: ${esc(errText(e))}`); } };
+      }
     }, { refetchInterval: 60000, cache: { staleTime: 30000, gcTime: 600000 } });
   };
   start();
+  // separate, optional health watch
+  mcp.watchTool('Supabase', 'execute_sql', { project_id: PROJECT, query: HEALTH_QUERY }, ev => {
+    if (ev.type === 'data') { try { lastCron = parsePayload(ev.result); cronErr = null; } catch { lastCron = null; } }
+    else { lastCron = null; cronErr = errText(ev.error) || ev.error?.code || 'unavailable'; }
+    if (lastMain) render({ ...lastMain, cronErr });
+  }, { refetchInterval: 60000, cache: { staleTime: 30000, gcTime: 600000 } });
 })();
 </script>
 </body>
