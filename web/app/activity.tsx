@@ -54,7 +54,7 @@ const finished = (j: Job) => {
 };
 
 const secs = (from: string | null, now: number) => from ? Math.max(0, Math.round((now - Date.parse(from)) / 1000)) : 0;
-const dur = (s: number) => s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`;
+const dur = (s: number) => s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`;
 const clock = (t: string) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 const k = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 
@@ -111,8 +111,10 @@ export function ActivityPanel({ jobs, runs, next }: { jobs: Job[]; runs: Run[]; 
         return (
           <div key={j.id} style={{ display: 'flex', alignItems: 'center', margin: '6px 0' }}>
             {dot(C.warn, true)}
-            <span>{doing(j)} <span style={{ color: C.warn, fontSize: 13 }}>— paused: Google’s free quota is used up for the moment.
-              {left > 0 ? ` Resumes by itself in about ${dur(left)}.` : ' Resuming now.'}</span></span>
+            <span>{doing(j)} <span style={{ color: C.warn, fontSize: 13 }}>
+              {left > 3600
+                ? `— paused: today’s free Google limit is used up for every model. Resumes by itself at ${new Date(j.run_after!).toLocaleString('en-GB', { weekday: 'short', hour: '2-digit', minute: '2-digit' })} (in ${dur(left)}). A paid Gemini plan removes this wait.`
+                : `— paused: Google’s per-minute limit. ${left > 0 ? `Resumes by itself in about ${dur(left)}.` : 'Resuming now.'}`}</span></span>
           </div>
         );
       })}

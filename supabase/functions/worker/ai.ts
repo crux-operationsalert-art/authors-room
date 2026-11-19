@@ -24,6 +24,13 @@ async function sha256(s: string) {
   return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+// Google says how long to wait, e.g. "Please retry in 17h37m58.0s" or "retry in 41.2s".
+function parseRetry(msg: string): number {
+  const m = msg.match(/retry in\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?/i);
+  if (!m) return 0;
+  return Math.ceil(Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0));
+}
+const isDailyLimit = (msg: string) => /per ?day|PerDay|requests per day/i.test(msg);
 
 export async function generate(db: SupabaseClient, req: GenerateRequest): Promise<GenerateResult> {
   const app = db.schema('app');
@@ -76,6 +83,7 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
 
   const t_all = Date.now();
   let lastMsg = '';
+  let quotaWait = 0;   // set when a model's DAILY free limit is used up and we moved on to the next model
   for (let mi = 0; mi < chain.length; mi++) {
     const m = chain[mi];
     if (mi > 0 && Date.now() - t_all > 60_000) break;          // stay inside the function's time limit
@@ -113,13 +121,20 @@ export async function generate(db: SupabaseClient, req: GenerateRequest): Promis
     lastMsg = msg;
     if (status === 429) {
       await record({ model_id: m.id, latency_ms, status: 'rate_limited', http_status: 429, error: msg });
-      // Never switch keys or models on quota: every key in the project shares this quota.
-      throw new QuotaExhaustedError(`Gemini quota reached: ${msg}`, retryAfter || 60);
+      const wait = retryAfter || parseRetry(msg) || 60;
+      // Never switch KEYS on quota: every key in the project shares it. A model's DAILY limit is its own,
+      // so the next model in the chain (with its own allowance in the same project) may still work today.
+      if (isDailyLimit(msg) && mi < chain.length - 1) {
+        quotaWait = quotaWait ? Math.min(quotaWait, wait) : wait;
+        continue;
+      }
+      throw new QuotaExhaustedError(`Gemini ${isDailyLimit(msg) ? 'daily free limit' : 'per-minute limit'} reached for ${m.id}`, Math.min(quotaWait ? Math.min(quotaWait, wait) : wait, 86400));
     }
     await record({ model_id: m.id, latency_ms, status: 'error', http_status: status || null, error: msg });
     // 5xx, timeouts and 404 (model retired for this project) move on to the next model; other errors stop.
     if (!(status === 0 || status >= 500 || status === 404)) throw new Error(`Gemini call failed (HTTP ${status}): ${msg}`);
     await sleep(1500);   // brief pause, then the next model in the chain
   }
+  if (quotaWait) throw new QuotaExhaustedError(`Gemini daily free limits reached for every model in tier "${req.tier}"`, Math.min(quotaWait, 86400));
   throw new Error(`All models for tier "${req.tier}" are unavailable right now: ${lastMsg}`);
 }
