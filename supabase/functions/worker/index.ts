@@ -63,6 +63,7 @@ Deno.serve(async (req) => {
   // Non-stop: let autopilot act on what just finished, then start the next step at once if work is ready.
   if (done.length) {
     await app.rpc('autopilot_tick_safe');
+    await app.rpc('maybe_emotion_audit');
     await app.rpc('kick_worker');
   }
   return json({ done });
@@ -123,6 +124,31 @@ async function directions(db: SupabaseClient, bookId: string, blockId?: string) 
   return list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
     `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '';
 }
+
+// The reader experience this book must create (generated once from the constitution, then stored on the book).
+const DEFAULT_SCALE = [{ face: '😄', label: 'Loving it' }, { face: '🙂', label: 'Enjoying it' }, { face: '😐', label: 'Flat' },
+                       { face: '🙁', label: 'Disappointed' }, { face: '😠', label: 'Put off' }];
+async function emotionProfile(db: SupabaseClient, job: any, base: any): Promise<any> {
+  const { data: b } = await db.from('books').select('emotion_profile').eq('id', job.book_id).single();
+  if ((b as any)?.emotion_profile?.intended) return (b as any).emotion_profile;
+  const { cons } = await bookContext(db, job.book_id);
+  if (!cons) return null;
+  const r = await generate(db, { ...base, system: R.emotionProfile.system, jsonSchema: R.emotionProfile.schema, temperature: 0.3,
+    prompt: `CONSTITUTION:\n${constitutionText(cons)}\n\nBRIEF:\n${JSON.stringify(cons.brief ?? {}, null, 1)}` });
+  const p = parse(r.text);
+  p.intended = (p.intended ?? []).slice(0, 6); p.avoid = (p.avoid ?? []).slice(0, 6);
+  p.scale = Array.isArray(p.scale) && p.scale.length >= 5 ? p.scale.slice(0, 5) : DEFAULT_SCALE;
+  await db.from('books').update({ emotion_profile: p }).eq('id', job.book_id);
+  return p;
+}
+function experienceText(p: any) {
+  if (!p?.intended) return '';
+  return `READER EXPERIENCE THIS BOOK MUST CREATE: ${p.summary ?? ''}\nIntended feelings: ${p.intended.map((e: any) => `${e.emotion} (${e.weight}/5)`).join(', ')}\n` +
+         `AVOID: ${(p.avoid ?? []).join('; ')}\n\n`;
+}
+const pct = (n: unknown) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
+const feltText = (felt: any[]) => (felt ?? []).slice(0, 4).map((f: any) => `${f.emotion} ${pct(f.intensity)}`).join(', ');
+const AUDIT_BAR = 80;   // paragraphs whose reader feeling matches the intended experience less than this are reworked
 
 // ------------------------------------------------------------------ jobs
 async function runJob(db: SupabaseClient, job: any, role: { team_code: string; default_tier: string }) {
@@ -308,6 +334,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
           (target && target - words < 200 ? 'This is the last paragraph of the chapter: bring it to a satisfying close.\n' : '') + '\n';
       }
     }
+    const prof = await emotionProfile(db, job, base);
     let task = prev.length ? 'Write the next paragraph.' : 'Write the opening paragraph of the book.';
     if (job.payload.guidance) task += `\nAuthor's guidance: ${job.payload.guidance}`;
     if (key === 'paragraph/revise') task = `Revise this paragraph:\n"""${current}"""\n\nInstructions: ${job.payload.instructions ?? ''}${job.payload.author_note ? `\nAuthor's note (highest priority): ${job.payload.author_note}` : ''}\nKeep what works. Output only the revised paragraph.`;
@@ -315,7 +342,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\nAvoid: ${(ctx.voice?.banned_phrases ?? []).join('; ')}\n\n` +
               `BOOK BIBLE:\n${ctx.ents.map((e: any) => `- ${e.type} ${e.name}: ${e.profile?.summary ?? ''}`).join('\n')}\n\n` +
               `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` +
-              chapterText + authorDirs + aroundText(around) + `TASK:\n${task}` });
+              chapterText + experienceText(prof) + authorDirs + aroundText(around) + `TASK:\n${task}` });
     const text = r.text.trim().replace(/^["“]|["”]$/g, '');
     const { data: vid, error } = await app.rpc('commit_block_version', { p_block_id: blockId, p_text: text,
       p_reason: key === 'paragraph/draft' ? 'first draft' : `revision ${loop}`, p_actor_type: 'agent',
@@ -373,9 +400,10 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const around = await neighbours(db, job.book_id, block_id);
     const authorDirs = await directions(db, job.book_id, block_id);
     const { data: v } = await db.from('block_versions').select('text').eq('id', block_version_id).single();
+    const prof = await emotionProfile(db, job, base);
     const r = await generate(db, { ...base, system: R.panel.system, jsonSchema: R.panel.schema, temperature: 0.2,
       prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\n\n` +
-              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + authorDirs +
+              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + experienceText(prof) + authorDirs +
               aroundText(around, 'EARLIER PARAGRAPHS') + `PARAGRAPH TO REVIEW (number ${around.number}):\n"""${v!.text}"""` });
     const o = parse(r.text);
     const byRole = new Map<string, any>((o.reviews ?? []).map((x: any) => [x.role, x]));
@@ -389,9 +417,13 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
         evidence: i.evidence ?? null, suggested_fix: i.suggested_fix })));
       total += Number(rv.score ?? 0); nIssues += rv.issues?.length ?? 0;
     }
+    if (o.reader) await db.from('reader_emotions').upsert({ book_id: job.book_id, block_id, block_version_id, source: 'panel',
+      felt: (o.reader.felt ?? []).map((f: any) => ({ emotion: String(f.emotion), intensity: pct(f.intensity) })),
+      match: pct(o.reader.match), drift: o.reader.drift || null, fix: o.reader.fix || null }, { onConflict: 'block_version_id,source' });
     await db.from('agent_jobs').insert({ book_id: job.book_id, workflow: 'paragraph', step: 'consolidate', role_code: 'chief_editor',
       priority: 89, payload: { block_id, block_version_id, loop } });
-    return { score: Math.round(total / Object.keys(R.LAYER1).length), issues: nIssues, panel: true };
+    return { score: Math.round(total / Object.keys(R.LAYER1).length), issues: nIssues, panel: true,
+             reader_match: o.reader ? pct(o.reader.match) : null };
   }
 
   if (key === 'paragraph/consolidate') {
@@ -407,8 +439,15 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const { data: bk } = await db.from('books').select('autopilot, autopilot_threshold').eq('id', job.book_id).single();
     const bar = bk?.autopilot ? `THE AUTHOR'S BAR: a paragraph is approved only with an overall score above ${bk.autopilot_threshold}/100. ` +
       `Score honestly: give a score above ${bk.autopilot_threshold} only when nothing worth fixing remains. Your instructions must say exactly what would lift it over the bar.\n\n` : '';
+    const { data: rd } = await db.from('reader_emotions').select('felt, match, drift, fix').eq('block_version_id', block_version_id).eq('source', 'panel').maybeSingle();
+    const { data: bp } = await db.from('books').select('emotion_profile').eq('id', job.book_id).single();
+    const cap = bk?.autopilot ? Number(bk.autopilot_threshold) : 90;
+    const readerCheck = rd ? `READER EMOTION CHECK (a simulated target reader, after reading this paragraph in sequence): felt ${feltText((rd as any).felt)}; ` +
+      `match with the intended experience ${(rd as any).match}/100.${(rd as any).drift ? ` What is off: ${(rd as any).drift}.` : ''}${(rd as any).fix ? ` Fix: ${(rd as any).fix}.` : ''}\n` +
+      `How the reader feels is the point of this book: if the match is below 85, the overall score must stay at or below ${cap} and your ` +
+      `instructions must restore the intended feeling first.\n\n` : '';
     const r = await generate(db, { ...base, system: R.consolidate.system, jsonSchema: R.consolidate.schema, temperature: 0.2,
-      prompt: bar + authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
+      prompt: bar + experienceText((bp as any)?.emotion_profile) + readerCheck + authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
     const o = parse(r.text);
     const blocking = (issues ?? []).some((i: any) => i.severity === 'critical' || i.severity === 'major');
     // A critical/major issue always forces revision; otherwise only a weak overall score does (minor notes are kept for the author).
@@ -435,6 +474,54 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'extract_facts', p_role: 'continuity_manager',
       p_priority: 70, p_payload: { block_id, block_version_id } });
     return { decision: 'pass', score: o.overall_score, instructions: o.instructions, summary: o.summary };
+  }
+
+  if (key === 'emotion/audit') {
+    const prof = await emotionProfile(db, job, base);
+    const ctx = await bookContext(db, job.book_id);
+    const { data: rows } = await db.from('manuscript_blocks').select('id, current_version_id, status, block_versions!manuscript_blocks_current_fk(text)')
+      .eq('book_id', job.book_id).neq('status', 'cut').order('order_key');
+    const all = ((rows ?? []) as any[]).filter(b => b.block_versions?.text);
+    if (!all.length) return { skipped: 'nothing written yet' };
+    const authorDirs = await directions(db, job.book_id);
+    const r = await generate(db, { ...base, system: R.emotionAudit.system, jsonSchema: R.emotionAudit.schema, temperature: 0.2, maxOutputTokens: 8000,
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\n${experienceText(prof)}${authorDirs}` +
+              `MANUSCRIPT (${all.length} paragraphs, in reading order):\n${all.map((b, i) => `[${i + 1}] ${b.block_versions.text}`).join('\n\n')}` });
+    const o = parse(r.text);
+    const rework: { n: number; blk: any; felt: any[]; match: number; drift: string; fix: string }[] = [];
+    let sum = 0, cnt = 0;
+    for (const p of o.paragraphs ?? []) {
+      const blk = all[Number(p.paragraph) - 1];
+      if (!blk) continue;
+      const felt = (p.felt ?? []).map((f: any) => ({ emotion: String(f.emotion), intensity: pct(f.intensity) }));
+      const match = pct(p.match); sum += match; cnt++;
+      await db.from('reader_emotions').upsert({ book_id: job.book_id, block_id: blk.id, block_version_id: blk.current_version_id,
+        source: 'audit', felt, match, drift: p.drift || null, fix: p.fix || null }, { onConflict: 'block_version_id,source' });
+      if (match < AUDIT_BAR && p.fix) rework.push({ n: Number(p.paragraph), blk, felt, match, drift: String(p.drift ?? ''), fix: String(p.fix) });
+    }
+    const standing = String(o.standing_direction ?? '').trim();
+    let noteId: string | null = null;
+    if (standing || rework.length) {
+      const { data: n } = await db.from('author_notes').insert({ book_id: job.book_id, scope: 'book',
+        note: `(Reader-emotion audit) ${standing || 'Every paragraph must land the intended reader feeling.'}` }).select('id').single();
+      noteId = (n as any)?.id ?? null;
+    }
+    rework.sort((a, b) => a.n - b.n);
+    for (const [k, w] of rework.entries()) {
+      await db.from('author_notes').insert({ book_id: job.book_id, block_id: w.blk.id, scope: 'paragraph', note: `(reader-emotion audit) ${w.fix}` });
+      const { error: reErr } = await app.rpc('reopen_for_feedback', { p_block: w.blk.id, p_note: noteId, p_priority: 93,
+        p_instruction: `Reader-emotion audit of paragraph ${w.n}: readers felt ${feltText(w.felt)} (match ${w.match}/100 with the intended experience).` +
+                       `${w.drift ? ` What is off: ${w.drift}.` : ''} Fix: ${w.fix}` });
+      if (reErr) throw new Error(`Could not reopen paragraph ${w.n}: ${reErr.message}`);
+      if (k > 0) await db.from('agent_jobs').update({ run_after: new Date(Date.now() + k * 120_000).toISOString() })
+        .eq('step', 'revise').eq('status', 'queued').eq('payload->>block_id', w.blk.id);
+    }
+    const avg = cnt ? Math.round(sum / cnt) : null;
+    await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant',
+      content: `Reader-emotion audit (${cnt} paragraphs, average match ${avg ?? '—'}/100). ${o.overall ?? ''}\n${o.message ?? ''}` +
+               (rework.length ? `\nReworking: ${rework.map(w => `paragraph ${w.n} (${w.match}/100)`).join(', ')}.` : '\nNo paragraph needs reworking.') +
+               (standing ? `\nFrom now on, for the whole book: ${standing}` : '') });
+    return { paragraphs: cnt, average_match: avg, rework: rework.map(w => w.n), standing: standing || null };
   }
 
   if (key === 'paragraph/extract_facts') {

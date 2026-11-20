@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p4-v1';
+export const PROMPT_VERSION = 'p5-v2';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -9,6 +9,17 @@ const str = { type: 'string' }, int = { type: 'integer' }, arr = (items: unknown
 export const HOUSE_RULES = `You are part of an editorial team serving one author, who is the creative owner and final decision-maker.
 Never invent real-world facts, citations, quotations or statistics. Keep the author's intentions. Be specific and brief.
 Write in British English unless the brief says otherwise.`;
+
+// What a demanding reader notices: shared by the per-paragraph reader and the whole-book audit.
+const DEMANDING_READER = `Be a demanding reader, not a polite one. Check specifically:
+- The narrator's mood: words of suffering or grievance (misery, horror, nightmare, hostage, purgatory, trapped, screaming,
+  dead weight) make the narrator sound aggrieved. In comedy and satire the narrator must sound amused and in control,
+  enjoying the absurdity; if the narrator sounds like they are venting, that is drift even when individual lines are witty.
+- Device fatigue: when the same structure (for example "externally I say X, internally I scream Y") or the same slang term
+  appears in consecutive paragraphs, the reader stops laughing at it by the third time, even if the author asked for that
+  device. The fix is to vary HOW the device is used (new angle, new form, a twist), never to drop the author's device.
+- Laughs: in a humour book, a paragraph with no surprising image, twist or punchline cannot match above 80.
+A match of 85 or more means a real reader would happily quote this paragraph to a friend.`;
 
 export const interviewer = {
   system: `${HOUSE_RULES}
@@ -139,13 +150,22 @@ For each specialist: concrete problems with quoted evidence and a specific fix; 
 facts or rights; major = clearly hurts the book; moderate = worth fixing; minor = polish. Do not invent problems: an empty
 issue list is valid. Score 0-100 for that specialist's focus. If the paragraph ignores an AUTHOR'S DIRECTION, the most relevant
 specialist reports a major issue. If it does not follow on smoothly from the paragraph before (or lead into the one after,
-when shown), the continuity specialist reports it. Return exactly one review per specialist.`,
+when shown), the continuity specialist reports it. Return exactly one review per specialist.
+Then, in "reader", step out of the panel and be ONE target reader who has just read this paragraph right after the earlier
+ones. Report the emotions you honestly feel (amused, laughing, bored, irritated, uncomfortable, moved, tense...), each with an
+intensity 0-100. Fatigue counts: a joke or structure you have already seen in earlier paragraphs lands weaker. "match" (0-100)
+says how close your feelings are to the READER EXPERIENCE this book is meant to create; "drift" names what is off in plain
+words (empty if nothing); "fix" says what would bring the feeling back. If the paragraph creates any emotion on the AVOID list
+(for example the writer sounding bitter or venting rather than playful), the reader_panel_manager reports a major issue.
+${DEMANDING_READER}`,
   schema: S({
     reviews: arr(S({ role: { type: 'string', enum: Object.keys(LAYER1) }, score: int, summary: str,
       issues: arr(S({ severity: { type: 'string', enum: ['critical','major','moderate','minor'] }, category: str,
                       issue: str, evidence: str, suggested_fix: str }, ['severity','category','issue','suggested_fix'])) },
       ['role', 'score', 'summary', 'issues'])),
-  }, ['reviews']),
+    reader: S({ felt: arr(S({ emotion: str, intensity: int }, ['emotion', 'intensity'])), match: int, drift: str, fix: str },
+              ['felt', 'match', 'drift', 'fix']),
+  }, ['reviews', 'reader']),
 };
 
 export const feedbackPlan = {
@@ -160,4 +180,39 @@ the rest of the book (tone, focus, a recurring idea), state it as a short "stand
     changes: arr(S({ paragraph: int, instruction: str }, ['paragraph', 'instruction'])),
     standing_direction: str, message: str,
   }, ['changes', 'message']),
+};
+
+// The reader experience this book must create; drives the reader-emotion meter.
+export const emotionProfile = {
+  system: `${HOUSE_RULES}
+You are the Reader Experience Lead. From the book's constitution, state how a reader should FEEL while reading it.
+"intended": 3-6 emotions with a weight 1-5 (for a satire: amused, laughing out loud, smug recognition, surprised by a punchline...).
+"avoid": 3-6 emotions or impressions that would betray this book (for a satire: the writer sounding bitter, angry, preachy,
+repetitive, mean-spirited rather than playful). "summary": one sentence. "scale": exactly 5 faces for this kind of book, from
+best to worst, each one emoji plus a 1-3 word label in the reader's terms (a comedy: 😂 Laughing out loud ... 😒 Annoyed;
+a thriller: 😱 On the edge ... 🥱 Bored; a self-help book: 🤩 Inspired ... 😕 Lost).`,
+  schema: S({
+    intended: arr(S({ emotion: str, weight: int }, ['emotion', 'weight'])),
+    avoid: arr(str), summary: str,
+    scale: arr(S({ face: str, label: str }, ['face', 'label'])),
+  }, ['intended', 'avoid', 'summary', 'scale']),
+};
+
+// A whole-manuscript read-through by target readers: how each paragraph lands, in sequence.
+export const emotionAudit = {
+  system: `${HOUSE_RULES}
+You are a panel of target readers reading the manuscript from the beginning, in order, as real readers would. For EVERY
+paragraph report what you honestly feel after reading it (emotions with intensity 0-100), how closely that matches the
+READER EXPERIENCE the book promises ("match" 0-100), what drifted ("drift": plain words, empty if nothing) and what would
+fix it ("fix": a concrete instruction for the writer that keeps the content and the author's directions but restores the
+intended feeling). Repetition matters: a joke, phrase or structure that already appeared lands weaker each time, and say so.
+Judge the tone the reader perceives, not the topic: satire about frustration is fine; a narrator who sounds genuinely
+bitter, aggrieved or venting is not. "overall": two or three sentences on the arc so far. "standing_direction": one short
+direction for the rest of the book if the drift is a pattern (empty otherwise). "message": two sentences for the author.
+${DEMANDING_READER}`,
+  schema: S({
+    paragraphs: arr(S({ paragraph: int, felt: arr(S({ emotion: str, intensity: int }, ['emotion', 'intensity'])),
+                        match: int, drift: str, fix: str }, ['paragraph', 'felt', 'match', 'drift', 'fix'])),
+    overall: str, standing_direction: str, message: str,
+  }, ['paragraphs', 'overall', 'message']),
 };

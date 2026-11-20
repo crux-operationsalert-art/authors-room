@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { app, kick, supabaseBrowser, BASE } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page } from './ui';
+import { Bar, etcText, faceFor, type Progress } from './meters';
 
 type Book = { id: string; working_title: string; status: string; kind: string; privacy_mode: string; created_at: string };
 
@@ -10,6 +11,7 @@ export default function Home() {
   const [session, setSession] = useState<any>(null);
   const [isAuthor, setIsAuthor] = useState<boolean | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
+  const [prog, setProg] = useState<Record<string, { p: Progress | null; match: number | null }>>({});
   const [msg, setMsg] = useState<string | null>(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -28,6 +30,16 @@ export default function Home() {
     if (a) {
       const { data } = await sb.from('books').select('*').order('created_at', { ascending: false });
       setBooks((data ?? []) as Book[]);
+      // progress, ETC and the latest reader mood for every book
+      const entries = await Promise.all(((data ?? []) as any[]).map(async b => {
+        const [{ data: p }, { data: r }] = await Promise.all([
+          app().rpc('book_progress', { p_book: b.id }),
+          sb.from('reader_emotions').select('match').eq('book_id', b.id).order('created_at', { ascending: false }).limit(5),
+        ]);
+        const ms = ((r ?? []) as any[]).map(x => Number(x.match)).filter(n => !isNaN(n));
+        return [b.id, { p: (p as Progress) ?? null, match: ms.length ? Math.round(ms.reduce((a, c) => a + c, 0) / ms.length) : null }] as const;
+      }));
+      setProg(Object.fromEntries(entries));
     }
   }, [sb]);
 
@@ -121,6 +133,14 @@ export default function Home() {
             <a key={b.id} href={`${BASE}/book/?id=${b.id}`} style={{ ...card, display: 'block', textDecoration: 'none', color: C.ink }}>
               <b>{b.working_title}</b>
               <div style={{ fontSize: 13, color: C.muted }}>{b.kind.replace('_', '-')} · {b.status} · {b.privacy_mode}</div>
+              {prog[b.id]?.p?.target_words ? (() => { const g = prog[b.id]; const f = faceFor((b as any).emotion_profile, g.match); return (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, gap: 8, flexWrap: 'wrap' }}>
+                    <span><b>{g.p!.percent ?? 0}%</b> · {etcText(g.p)}</span>
+                    {g.match != null && <span title="How readers feel about the latest paragraphs" style={{ color: f.color }}>{f.face} {f.label}</span>}
+                  </div>
+                  <Bar pct={g.p!.percent ?? 0} height={8} />
+                </div>); })() : null}
             </a>
           ))}
         </section>

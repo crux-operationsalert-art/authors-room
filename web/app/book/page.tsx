@@ -4,6 +4,7 @@ import { useSearchParams } from 'next/navigation';
 import { app, kick, supabaseBrowser } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page, Status } from '../ui';
 import { ActivityPanel, NextStep } from '../activity';
+import { MoodMeter, ParagraphMood, ProgressCard, latestReading, type Progress, type Reading } from '../meters';
 
 type Msg = { id: string; role: string; content: string; created_at: string };
 type Decision = { id: string; type: string; subject_ref: string | null; question: string; options: any[]; recommendation: string | null; status: string };
@@ -34,6 +35,8 @@ function Workspace() {
   const [approvals, setApprovals] = useState<any[]>([]);
   const [threshold, setThreshold] = useState<string>('');
   const [notesList, setNotesList] = useState<any[]>([]);
+  const [readings, setReadings] = useState<Reading[]>([]);
+  const [progress, setProgress] = useState<Progress | null>(null);
   const [bookNote, setBookNote] = useState('');
   const [runs, setRuns] = useState<any[]>([]);
   const [text, setText] = useState('');
@@ -44,7 +47,7 @@ function Workspace() {
 
   const load = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an] = await Promise.all([
+    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
       sb.from('decisions').select('*').eq('book_id', id).eq('status', 'pending').order('created_at'),
@@ -61,11 +64,14 @@ function Workspace() {
       sb.from('outline_units').select('id, parent_id, level, order_key, title, purpose, beats, target_words, status').eq('book_id', id).order('order_key'),
       sb.from('approvals').select('subject_id, via, note, created_at').eq('book_id', id).eq('subject_type', 'block'),
       sb.from('author_notes').select('id, block_id, scope, note, status, created_at').eq('book_id', id).order('created_at', { ascending: false }),
+      sb.from('reader_emotions').select('block_id, block_version_id, source, felt, match, drift, fix, created_at').eq('book_id', id).order('created_at', { ascending: false }).limit(600),
+      app().rpc('book_progress', { p_book: id }),
     ]);
     setBook(b.data); setMsgs((m.data ?? []) as Msg[]); setDecisions((d.data ?? []) as Decision[]); setCons(c.data);
     setEnts(e.data ?? []); setBlocks((bl.data ?? []) as any); setIssues((is.data ?? []) as Issue[]);
     setReviews((rv.data ?? []) as Review[]); setJobs(j.data ?? []);
     setAllJobs(aj.data ?? []); setRuns(ar.data ?? []); setUnits(ou.data ?? []); setApprovals(ap.data ?? []); setNotesList(an.data ?? []);
+    setReadings((re.data ?? []) as Reading[]); if (!pr.error) setProgress(pr.data as Progress);
   }, [sb, id]);
 
   useEffect(() => {
@@ -169,6 +175,11 @@ function Workspace() {
         <button style={btn} onClick={downloadManuscript} disabled={!blocks.some(b => b.block_versions)}>Download manuscript (.md)</button>
       </div>
       <ActivityPanel jobs={allJobs} runs={runs} next={next} />
+      {cons?.status === 'approved' && <ProgressCard p={progress} />}
+      {blocks.some(b => b.block_versions) && (
+        <MoodMeter profile={book.emotion_profile} readings={readings} blocks={blocks.filter(b => b.status !== 'cut')}
+          auditRunning={allJobs.some(j => j.workflow === 'emotion' && j.step === 'audit' && ['queued', 'running', 'waiting_quota'].includes(j.status))}
+          onAudit={() => run(app().rpc('request_emotion_audit', { p_book: id }))} />)}
       {cons?.status === 'approved' && (
         <section id="act-autopilot" style={{ ...card, borderColor: book.autopilot ? C.ok : C.line }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -325,6 +336,7 @@ function Workspace() {
                           Autopilot is improving it{sc.length ? ` · best so far ${Math.max(...sc)}` : ''} · needs above {book.autopilot_threshold}</span>; })()
                     : <Status s={b.status} />}
                   {v && <span style={{ fontSize: 12, color: C.muted }}>v{v.version_no} · {v.provenance.replace('_', ' ')}</span>}
+                  <ParagraphMood profile={book.emotion_profile} reading={latestReading(readings, b.id, b.current_version_id)} />
                   {flag?.via === 'autopilot' && <span style={{ fontSize: 12, color: flag.note ? C.warn : C.ok }}>{flag.note ? '⚑ Approved by autopilot · review later' : '✓ Approved by autopilot'}</span>}
                   {avg !== null && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>Review score {avg}/100</span>}
                 </div>
