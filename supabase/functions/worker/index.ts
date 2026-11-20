@@ -85,10 +85,11 @@ async function bookContext(db: SupabaseClient, bookId: string) {
   return { book, cons, voice, ents: ents ?? [], facts: facts ?? [] };
 }
 
-function constitutionText(c: any) {
+function constitutionText(c: any, reserveEnding = false) {
   return [`Premise: ${c.premise}`, `Genre: ${c.genre} / ${c.subgenre}`, `Audience: ${c.audience}`,
     `Themes: ${(c.themes ?? []).join(', ')}`, `POV: ${c.pov}; tense: ${c.tense}`, `Voice: ${c.voice}`,
-    `Ending intent: ${c.ending_intent}`, `Length: ${c.length_target}`,
+    reserveEnding ? `Ending intent (RESERVED for the final chapter: steer towards it, but never state it, preach it or deliver it as settled before then): ${c.ending_intent}`
+                  : `Ending intent: ${c.ending_intent}`, `Length: ${c.length_target}`,
     `Never change: ${(c.never_change ?? []).join('; ')}`].join('\n');
 }
 
@@ -125,6 +126,42 @@ async function directions(db: SupabaseClient, bookId: string, blockId?: string) 
     `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '';
 }
 
+// Storytelling ground rules for every book (app.settings 'craft_rules', editable without a redeploy).
+async function craftText(db: SupabaseClient) {
+  const { data } = await db.schema('app').from('settings').select('value').eq('key', 'craft_rules').maybeSingle();
+  let rules: string[] = R.DEFAULT_CRAFT;
+  try { const j = JSON.parse(String((data as any)?.value ?? '')); if (Array.isArray(j) && j.length) rules = j.map(String); } catch { /* fallback */ }
+  return `STORYTELLING GROUND RULES (apply to every paragraph of every book):\n${rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n\n`;
+}
+// Where a paragraph sits in the chapter plan: chapter number, total chapters, current beat (by words written so far).
+async function placeInPlan(db: SupabaseClient, bookId: string, unitId: string | null) {
+  const app = db.schema('app');
+  const { data: chs } = await db.from('outline_units').select('id, title, purpose, beats, target_words').eq('book_id', bookId).eq('level', 'chapter').order('order_key');
+  const list = (chs ?? []) as any[];
+  if (!unitId || !list.length) return { idx: -1, total: list.length, list, text: '', last: list.length <= 1 };
+  const { data: chId } = await app.rpc('chapter_of', { p_unit: unitId });
+  const idx = list.findIndex(c => c.id === chId);
+  if (idx < 0) return { idx, total: list.length, list, text: '', last: false };
+  const ch = list[idx];
+  const { data: sofar } = await app.rpc('chapter_words', { p_chapter: ch.id, p_approved_only: true });
+  const words = Number(sofar ?? 0), target = Number(ch.target_words ?? 0);
+  const beats: string[] = (ch.beats ?? []).map(String);
+  const bi = beats.length && target ? Math.min(beats.length - 1, Math.floor(words / (target / beats.length))) : 0;
+  const last = idx === list.length - 1;
+  const closing = target && target - words < 250;
+  const text = `CHAPTER PLAN:\n${list.map((c, i) => `${i + 1}. ${c.title}${i === idx ? '   <== CURRENT' : ''}`).join('\n')}\n\n` +
+    `CURRENT CHAPTER ${idx + 1} of ${list.length}: ${ch.title}\nPurpose: ${ch.purpose ?? ''}\n` +
+    (target ? `Written so far in this chapter: ${words} of about ${target} words.\n` : '') +
+    (beats.length ? `CURRENT BEAT (${bi + 1} of ${beats.length}): ${beats[bi]}\n` +
+      (beats[bi + 1] ? `Next beat (not yet; you may tease it): ${beats[bi + 1]}\n` : '') : '') +
+    (words === 0 ? `This paragraph OPENS chapter ${idx + 1}: its first line must hook the reader within 3 seconds.\n` : '') +
+    (closing ? (last ? 'This is the last paragraph of the book: now deliver the payoff the whole book has been building to.\n'
+                     : `This is the last paragraph of the chapter: end on a hook into chapter ${idx + 2} (${list[idx + 1]?.title ?? ''}), not on a conclusion.\n`)
+             : `This paragraph is mid-chapter: end it pulling the reader into the next paragraph.\n`) +
+    (last ? '' : `The book's conclusion belongs to chapter ${list.length}; do not deliver it, or any final verdict, here.\n`) + '\n';
+  return { idx, total: list.length, list, text, last };
+}
+
 // The reader experience this book must create (generated once from the constitution, then stored on the book).
 const DEFAULT_SCALE = [{ face: '😄', label: 'Loving it' }, { face: '🙂', label: 'Enjoying it' }, { face: '😐', label: 'Flat' },
                        { face: '🙁', label: 'Disappointed' }, { face: '😠', label: 'Put off' }];
@@ -149,6 +186,7 @@ function experienceText(p: any) {
 const pct = (n: unknown) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
 const feltText = (felt: any[]) => (felt ?? []).slice(0, 4).map((f: any) => `${f.emotion} ${pct(f.intensity)}`).join(', ');
 const AUDIT_BAR = 80;   // paragraphs whose reader feeling matches the intended experience less than this are reworked
+const PULL_BAR = 70;    // ...or whose page-turn pull is below this
 
 // ------------------------------------------------------------------ jobs
 async function runJob(db: SupabaseClient, job: any, role: { team_code: string; default_tier: string }) {
@@ -317,32 +355,19 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       const { data: bv } = await db.from('block_versions').select('text').eq('id', job.payload.base_version_id).maybeSingle();
       if (bv?.text) current = bv.text;
     }
-    // chapter context: which chapter this paragraph belongs to, its plan and how far along it is
-    let chapterText = '';
-    if ((blk as any)?.unit_id) {
-      const { data: chId } = await app.rpc('chapter_of', { p_unit: (blk as any).unit_id });
-      const { data: chs } = await db.from('outline_units').select('id, title, purpose, beats, target_words').eq('book_id', job.book_id).eq('level', 'chapter').order('order_key');
-      const idx = (chs ?? []).findIndex((c: any) => c.id === chId);
-      if (idx >= 0) {
-        const ch = (chs as any[])[idx];
-        const { data: sofar } = await app.rpc('chapter_words', { p_chapter: ch.id, p_approved_only: true });
-        const words = Number(sofar ?? 0), target = Number(ch.target_words ?? 0);
-        chapterText = `CHAPTER PLAN:\n${(chs as any[]).map((c, i) => `${i + 1}. ${c.title}${i === idx ? '   <== CURRENT' : ''}`).join('\n')}\n\n` +
-          `CURRENT CHAPTER ${idx + 1}: ${ch.title}\nPurpose: ${ch.purpose ?? ''}\nBeats: ${(ch.beats ?? []).join(' | ')}\n` +
-          (target ? `Written so far in this chapter: ${words} of about ${target} words.\n` : '') +
-          (words === 0 ? `This paragraph OPENS chapter ${idx + 1}.\n` : '') +
-          (target && target - words < 200 ? 'This is the last paragraph of the chapter: bring it to a satisfying close.\n' : '') + '\n';
-      }
-    }
+    // where this paragraph sits: chapter, current beat, whether the ending may be told yet
+    const place = await placeInPlan(db, job.book_id, (blk as any)?.unit_id ?? null);
+    const chapterText = place.text;
+    const craft = await craftText(db);
     const prof = await emotionProfile(db, job, base);
     let task = prev.length ? 'Write the next paragraph.' : 'Write the opening paragraph of the book.';
     if (job.payload.guidance) task += `\nAuthor's guidance: ${job.payload.guidance}`;
     if (key === 'paragraph/revise') task = `Revise this paragraph:\n"""${current}"""\n\nInstructions: ${job.payload.instructions ?? ''}${job.payload.author_note ? `\nAuthor's note (highest priority): ${job.payload.author_note}` : ''}\nKeep what works. Output only the revised paragraph.`;
     const r = await generate(db, { ...base, system: R.writer.system, maxOutputTokens: 1200, temperature: 0.9,
-      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\nAvoid: ${(ctx.voice?.banned_phrases ?? []).join('; ')}\n\n` +
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons, !place.last)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\nAvoid: ${(ctx.voice?.banned_phrases ?? []).join('; ')}\n\n` +
               `BOOK BIBLE:\n${ctx.ents.map((e: any) => `- ${e.type} ${e.name}: ${e.profile?.summary ?? ''}`).join('\n')}\n\n` +
               `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` +
-              chapterText + experienceText(prof) + authorDirs + aroundText(around) + `TASK:\n${task}` });
+              chapterText + craft + experienceText(prof) + authorDirs + aroundText(around) + `TASK:\n${task}` });
     const text = r.text.trim().replace(/^["“]|["”]$/g, '');
     const { data: vid, error } = await app.rpc('commit_block_version', { p_block_id: blockId, p_text: text,
       p_reason: key === 'paragraph/draft' ? 'first draft' : `revision ${loop}`, p_actor_type: 'agent',
@@ -401,9 +426,12 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const authorDirs = await directions(db, job.book_id, block_id);
     const { data: v } = await db.from('block_versions').select('text').eq('id', block_version_id).single();
     const prof = await emotionProfile(db, job, base);
+    const { data: pb } = await db.from('manuscript_blocks').select('unit_id').eq('id', block_id).single();
+    const place = await placeInPlan(db, job.book_id, (pb as any)?.unit_id ?? null);
+    const craft = await craftText(db);
     const r = await generate(db, { ...base, system: R.panel.system, jsonSchema: R.panel.schema, temperature: 0.2,
-      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\n\n` +
-              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + experienceText(prof) + authorDirs +
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons, !place.last)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\n\n` +
+              `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + place.text + craft + experienceText(prof) + authorDirs +
               aroundText(around, 'EARLIER PARAGRAPHS') + `PARAGRAPH TO REVIEW (number ${around.number}):\n"""${v!.text}"""` });
     const o = parse(r.text);
     const byRole = new Map<string, any>((o.reviews ?? []).map((x: any) => [x.role, x]));
@@ -419,7 +447,8 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     }
     if (o.reader) await db.from('reader_emotions').upsert({ book_id: job.book_id, block_id, block_version_id, source: 'panel',
       felt: (o.reader.felt ?? []).map((f: any) => ({ emotion: String(f.emotion), intensity: pct(f.intensity) })),
-      match: pct(o.reader.match), drift: o.reader.drift || null, fix: o.reader.fix || null }, { onConflict: 'block_version_id,source' });
+      match: pct(o.reader.match), pull: o.reader.pull == null ? null : pct(o.reader.pull),
+      drift: o.reader.drift || null, fix: o.reader.fix || null }, { onConflict: 'block_version_id,source' });
     await db.from('agent_jobs').insert({ book_id: job.book_id, workflow: 'paragraph', step: 'consolidate', role_code: 'chief_editor',
       priority: 89, payload: { block_id, block_version_id, loop } });
     return { score: Math.round(total / Object.keys(R.LAYER1).length), issues: nIssues, panel: true,
@@ -439,15 +468,17 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const { data: bk } = await db.from('books').select('autopilot, autopilot_threshold').eq('id', job.book_id).single();
     const bar = bk?.autopilot ? `THE AUTHOR'S BAR: a paragraph is approved only with an overall score above ${bk.autopilot_threshold}/100. ` +
       `Score honestly: give a score above ${bk.autopilot_threshold} only when nothing worth fixing remains. Your instructions must say exactly what would lift it over the bar.\n\n` : '';
-    const { data: rd } = await db.from('reader_emotions').select('felt, match, drift, fix').eq('block_version_id', block_version_id).eq('source', 'panel').maybeSingle();
+    const { data: rd } = await db.from('reader_emotions').select('felt, match, pull, drift, fix').eq('block_version_id', block_version_id).eq('source', 'panel').maybeSingle();
+    const craft = await craftText(db);
     const { data: bp } = await db.from('books').select('emotion_profile').eq('id', job.book_id).single();
     const cap = bk?.autopilot ? Number(bk.autopilot_threshold) : 90;
     const readerCheck = rd ? `READER EMOTION CHECK (a simulated target reader, after reading this paragraph in sequence): felt ${feltText((rd as any).felt)}; ` +
-      `match with the intended experience ${(rd as any).match}/100.${(rd as any).drift ? ` What is off: ${(rd as any).drift}.` : ''}${(rd as any).fix ? ` Fix: ${(rd as any).fix}.` : ''}\n` +
-      `How the reader feels is the point of this book: if the match is below 85, the overall score must stay at or below ${cap} and your ` +
-      `instructions must restore the intended feeling first.\n\n` : '';
+      `match with the intended experience ${(rd as any).match}/100; page-turn pull ${(rd as any).pull ?? 'not given'}/100.` +
+      `${(rd as any).drift ? ` What is off: ${(rd as any).drift}.` : ''}${(rd as any).fix ? ` Fix: ${(rd as any).fix}.` : ''}\n` +
+      `How the reader feels, and whether they turn the page, is the point of this book: if the match is below 85 or the pull is below 75, ` +
+      `the overall score must stay at or below ${cap} and your instructions must restore the feeling and the pull forward first.\n\n` : '';
     const r = await generate(db, { ...base, system: R.consolidate.system, jsonSchema: R.consolidate.schema, temperature: 0.2,
-      prompt: bar + experienceText((bp as any)?.emotion_profile) + readerCheck + authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
+      prompt: bar + craft + experienceText((bp as any)?.emotion_profile) + readerCheck + authorDirs + `PARAGRAPH:\n"""${v!.text}"""\n\nREVIEWS:\n${JSON.stringify(runs, null, 1)}\n\nISSUES:\n${JSON.stringify(issues, null, 1)}` });
     const o = parse(r.text);
     const blocking = (issues ?? []).some((i: any) => i.severity === 'critical' || i.severity === 'major');
     // A critical/major issue always forces revision; otherwise only a weak overall score does (minor notes are kept for the author).
@@ -484,20 +515,29 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const all = ((rows ?? []) as any[]).filter(b => b.block_versions?.text);
     if (!all.length) return { skipped: 'nothing written yet' };
     const authorDirs = await directions(db, job.book_id);
+    const craft = await craftText(db);
+    // which chapter each paragraph belongs to, so the readers can judge pacing against the plan
+    const { data: units } = await db.from('manuscript_blocks').select('id, unit_id').eq('book_id', job.book_id).neq('status', 'cut');
+    const firstUnit = ((units ?? []) as any[]).find(u => u.unit_id)?.unit_id ?? null;
+    const place = await placeInPlan(db, job.book_id, firstUnit);
+    const planText = place.list.length ? `CHAPTER PLAN (${place.list.length} chapters; the manuscript so far is the start of the book, ` +
+      `so the conclusion belongs to chapter ${place.list.length}, not here):\n${place.list.map((c: any, i: number) => `${i + 1}. ${c.title}: ${c.purpose ?? ''}`).join('\n')}\n\n` : '';
     const r = await generate(db, { ...base, system: R.emotionAudit.system, jsonSchema: R.emotionAudit.schema, temperature: 0.2, maxOutputTokens: 8000,
-      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\n${experienceText(prof)}${authorDirs}` +
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons, place.list.length > 1)}\n\n${planText}${craft}${experienceText(prof)}${authorDirs}` +
               `MANUSCRIPT (${all.length} paragraphs, in reading order):\n${all.map((b, i) => `[${i + 1}] ${b.block_versions.text}`).join('\n\n')}` });
     const o = parse(r.text);
-    const rework: { n: number; blk: any; felt: any[]; match: number; drift: string; fix: string }[] = [];
+    const rework: { n: number; blk: any; felt: any[]; match: number; pull: number | null; drift: string; fix: string }[] = [];
     let sum = 0, cnt = 0;
     for (const p of o.paragraphs ?? []) {
       const blk = all[Number(p.paragraph) - 1];
       if (!blk) continue;
       const felt = (p.felt ?? []).map((f: any) => ({ emotion: String(f.emotion), intensity: pct(f.intensity) }));
       const match = pct(p.match); sum += match; cnt++;
+      const pull = p.pull == null ? null : pct(p.pull);
       await db.from('reader_emotions').upsert({ book_id: job.book_id, block_id: blk.id, block_version_id: blk.current_version_id,
-        source: 'audit', felt, match, drift: p.drift || null, fix: p.fix || null }, { onConflict: 'block_version_id,source' });
-      if (match < AUDIT_BAR && p.fix) rework.push({ n: Number(p.paragraph), blk, felt, match, drift: String(p.drift ?? ''), fix: String(p.fix) });
+        source: 'audit', felt, match, pull, drift: p.drift || null, fix: p.fix || null }, { onConflict: 'block_version_id,source' });
+      if ((match < AUDIT_BAR || (pull != null && pull < PULL_BAR)) && p.fix)
+        rework.push({ n: Number(p.paragraph), blk, felt, match, pull, drift: String(p.drift ?? ''), fix: String(p.fix) });
     }
     const standing = String(o.standing_direction ?? '').trim();
     let noteId: string | null = null;
@@ -510,7 +550,8 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     for (const [k, w] of rework.entries()) {
       await db.from('author_notes').insert({ book_id: job.book_id, block_id: w.blk.id, scope: 'paragraph', note: `(reader-emotion audit) ${w.fix}` });
       const { error: reErr } = await app.rpc('reopen_for_feedback', { p_block: w.blk.id, p_note: noteId, p_priority: 93,
-        p_instruction: `Reader-emotion audit of paragraph ${w.n}: readers felt ${feltText(w.felt)} (match ${w.match}/100 with the intended experience).` +
+        p_instruction: `Reader-emotion audit of paragraph ${w.n}: readers felt ${feltText(w.felt)} (match ${w.match}/100 with the intended experience` +
+                       `${w.pull != null ? `; page-turn pull ${w.pull}/100` : ''}).` +
                        `${w.drift ? ` What is off: ${w.drift}.` : ''} Fix: ${w.fix}` });
       if (reErr) throw new Error(`Could not reopen paragraph ${w.n}: ${reErr.message}`);
       if (k > 0) await db.from('agent_jobs').update({ run_after: new Date(Date.now() + k * 120_000).toISOString() })
@@ -519,7 +560,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const avg = cnt ? Math.round(sum / cnt) : null;
     await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant',
       content: `Reader-emotion audit (${cnt} paragraphs, average match ${avg ?? '—'}/100). ${o.overall ?? ''}\n${o.message ?? ''}` +
-               (rework.length ? `\nReworking: ${rework.map(w => `paragraph ${w.n} (${w.match}/100)`).join(', ')}.` : '\nNo paragraph needs reworking.') +
+               (rework.length ? `\nReworking: ${rework.map(w => `paragraph ${w.n} (feeling ${w.match}${w.pull != null ? `, pull ${w.pull}` : ''})`).join(', ')}.` : '\nNo paragraph needs reworking.') +
                (standing ? `\nFrom now on, for the whole book: ${standing}` : '') });
     return { paragraphs: cnt, average_match: avg, rework: rework.map(w => w.n), standing: standing || null };
   }

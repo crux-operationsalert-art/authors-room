@@ -4,7 +4,7 @@ import { useSearchParams } from 'next/navigation';
 import { app, kick, supabaseBrowser } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page, Status } from '../ui';
 import { ActivityPanel, NextStep } from '../activity';
-import { MoodMeter, ParagraphMood, ProgressCard, latestReading, type Progress, type Reading } from '../meters';
+import { GroundRules, MoodMeter, ParagraphMood, ProgressCard, latestReading, type Progress, type Reading } from '../meters';
 
 type Msg = { id: string; role: string; content: string; created_at: string };
 type Decision = { id: string; type: string; subject_ref: string | null; question: string; options: any[]; recommendation: string | null; status: string };
@@ -37,6 +37,7 @@ function Workspace() {
   const [notesList, setNotesList] = useState<any[]>([]);
   const [readings, setReadings] = useState<Reading[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [rules, setRules] = useState<string[]>([]);
   const [bookNote, setBookNote] = useState('');
   const [runs, setRuns] = useState<any[]>([]);
   const [text, setText] = useState('');
@@ -47,7 +48,7 @@ function Workspace() {
 
   const load = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr] = await Promise.all([
+    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr, cr] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
       sb.from('decisions').select('*').eq('book_id', id).eq('status', 'pending').order('created_at'),
@@ -64,14 +65,16 @@ function Workspace() {
       sb.from('outline_units').select('id, parent_id, level, order_key, title, purpose, beats, target_words, status').eq('book_id', id).order('order_key'),
       sb.from('approvals').select('subject_id, via, note, created_at').eq('book_id', id).eq('subject_type', 'block'),
       sb.from('author_notes').select('id, block_id, scope, note, status, created_at').eq('book_id', id).order('created_at', { ascending: false }),
-      sb.from('reader_emotions').select('block_id, block_version_id, source, felt, match, drift, fix, created_at').eq('book_id', id).order('created_at', { ascending: false }).limit(600),
+      sb.from('reader_emotions').select('block_id, block_version_id, source, felt, match, pull, drift, fix, created_at').eq('book_id', id).order('created_at', { ascending: false }).limit(600),
       app().rpc('book_progress', { p_book: id }),
+      app().rpc('craft_rules'),
     ]);
     setBook(b.data); setMsgs((m.data ?? []) as Msg[]); setDecisions((d.data ?? []) as Decision[]); setCons(c.data);
     setEnts(e.data ?? []); setBlocks((bl.data ?? []) as any); setIssues((is.data ?? []) as Issue[]);
     setReviews((rv.data ?? []) as Review[]); setJobs(j.data ?? []);
     setAllJobs(aj.data ?? []); setRuns(ar.data ?? []); setUnits(ou.data ?? []); setApprovals(ap.data ?? []); setNotesList(an.data ?? []);
     setReadings((re.data ?? []) as Reading[]); if (!pr.error) setProgress(pr.data as Progress);
+    if (!cr.error && Array.isArray(cr.data)) setRules(cr.data as string[]);
   }, [sb, id]);
 
   useEffect(() => {
@@ -180,6 +183,7 @@ function Workspace() {
         <MoodMeter profile={book.emotion_profile} readings={readings} blocks={blocks.filter(b => b.status !== 'cut')}
           auditRunning={allJobs.some(j => j.workflow === 'emotion' && j.step === 'audit' && ['queued', 'running', 'waiting_quota'].includes(j.status))}
           onAudit={() => run(app().rpc('request_emotion_audit', { p_book: id }))} />)}
+      {cons?.status === 'approved' && <GroundRules rules={rules} />}
       {cons?.status === 'approved' && (
         <section id="act-autopilot" style={{ ...card, borderColor: book.autopilot ? C.ok : C.line }}>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

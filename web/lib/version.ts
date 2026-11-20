@@ -1,3 +1,3 @@
 // Bumped on every release (scripts/bump-version.mjs writes this file and public/version.json together).
-export const APP_VERSION = '2026-11-20.02';
+export const APP_VERSION = '2026-11-20.03';
 export const LIVE_URL = 'https://crux-operationsalert-art.github.io/authors-room/';

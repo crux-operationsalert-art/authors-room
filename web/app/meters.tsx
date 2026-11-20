@@ -5,7 +5,7 @@ import { C, card, btn } from './ui';
 export type Progress = { target_words: number; approved_words: number; approved_paragraphs: number; percent: number | null;
   words_per_hour: number; words_left: number; hours_left: number | null; eta: string | null };
 export type Reading = { block_id: string; block_version_id: string; source: 'panel' | 'audit'; felt: { emotion: string; intensity: number }[];
-  match: number | null; drift: string | null; fix: string | null; created_at: string };
+  match: number | null; pull?: number | null; drift: string | null; fix: string | null; created_at: string };
 
 const fmt = (n: number) => Math.round(n).toLocaleString('en-IN');
 export function duration(hours: number) {
@@ -78,7 +78,7 @@ export function ParagraphMood({ profile, reading }: { profile: any; reading: { r
   const f = faceFor(profile, reading.r.match);
   const felt = reading.r.felt.slice(0, 3).map(e => `${e.emotion} ${e.intensity}`).join(', ');
   return (
-    <span title={`Readers felt: ${felt}${reading.r.drift ? `\nWhat is off: ${reading.r.drift}` : ''}${reading.current ? '' : '\n(reading of an earlier version)'}`}
+    <span title={`Readers felt: ${felt}${reading.r.pull != null ? `\nWant to read on: ${reading.r.pull}/100` : ''}${reading.r.drift ? `\nWhat is off: ${reading.r.drift}` : ''}${reading.current ? '' : '\n(reading of an earlier version)'}`}
           style={{ fontSize: 12, color: f.color, border: `1px solid ${f.color}`, borderRadius: 10, padding: '0 8px', opacity: reading.current ? 1 : 0.6 }}>
       {f.face} {f.label} · {reading.r.match}/100
     </span>
@@ -97,6 +97,9 @@ export function MoodMeter({ profile, readings, blocks, onAudit, auditRunning }:
   const top = [...felt.entries()].map(([k, v]) => [k, Math.round(v.reduce((a, b) => a + b, 0) / recent.length)] as [string, number])
     .sort((a, b) => b[1] - a[1]).slice(0, 6);
   const drifts = recent.map(x => x.r.drift).filter(Boolean).slice(-2) as string[];
+  const pulls = recent.map(x => x.r.pull).filter((v): v is number => v != null);
+  const pull = pulls.length ? Math.round(pulls.reduce((a, b) => a + b, 0) / pulls.length) : null;
+  const pullColor = pull == null ? C.muted : pull >= 75 ? C.ok : pull >= 60 ? C.warn : C.bad;
   return (
     <section id="act-mood" style={{ ...card, borderColor: f.color }}>
       <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -107,6 +110,12 @@ export function MoodMeter({ profile, readings, blocks, onAudit, auditRunning }:
             {profile?.summary ?? 'The team works out how this book should make readers feel from its constitution.'}
           </div>
           {avg != null && <Bar pct={avg} color={f.color} height={8} />}
+          {pull != null && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 13 }}>Want to read on (page-turn pull): <b style={{ color: pullColor }}>{pull}/100</b>
+                <span style={{ color: C.muted }}> · below 70, the paragraph is rewritten to leave the reader curious</span></div>
+              <Bar pct={pull} color={pullColor} height={6} />
+            </div>)}
         </div>
         <button style={btn} disabled={auditRunning} onClick={onAudit}>{auditRunning ? 'Readers are reading the book…' : 'Re-read the whole book as readers'}</button>
       </div>
@@ -129,5 +138,19 @@ export function MoodMeter({ profile, readings, blocks, onAudit, auditRunning }:
         </div>)}
       {drifts.length > 0 && <p style={{ fontSize: 13, color: C.warn, margin: '8px 0 0' }}>What readers noticed: {drifts.join(' · ')}</p>}
     </section>
+  );
+}
+
+// The storytelling ground rules every book follows (set by the team; shown read-only).
+export function GroundRules({ rules }: { rules: string[] }) {
+  if (!rules.length) return null;
+  return (
+    <details style={{ ...card, padding: '10px 14px' }}>
+      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Storytelling ground rules ({rules.length}) — every paragraph is written and reviewed against these</summary>
+      <ol style={{ margin: '8px 0 0', paddingLeft: 20, fontSize: 14 }}>
+        {rules.map((r, i) => <li key={i} style={{ marginBottom: 4 }}>{r}</li>)}
+      </ol>
+      <p style={{ fontSize: 13, color: C.muted, margin: '6px 0 0' }}>To add your own rule for this book, use “Direction for the whole book” in the autopilot card.</p>
+    </details>
   );
 }

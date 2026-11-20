@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p5-v2';
+export const PROMPT_VERSION = 'p6-v1';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -20,6 +20,18 @@ const DEMANDING_READER = `Be a demanding reader, not a polite one. Check specifi
   device. The fix is to vary HOW the device is used (new angle, new form, a twist), never to drop the author's device.
 - Laughs: in a humour book, a paragraph with no surprising image, twist or punchline cannot match above 80.
 A match of 85 or more means a real reader would happily quote this paragraph to a friend.`;
+
+// Storytelling ground rules for every book (the live list is app.settings 'craft_rules'; this is the fallback).
+export const DEFAULT_CRAFT = [
+  'Hook in 3 seconds: the first sentence of every paragraph must earn the second, and the first line of every chapter must grab at once (a surprise, a provocation, a vivid image or a question). No throat-clearing openers such as "Let us be honest", "Consider", "Once you".',
+  'Keep loops open: every chapter raises at least one question it does not answer yet, and every paragraph ends pulling the reader forward (a tease, a twist, a question, a promise), never on a summary or a verdict.',
+  'Save the payoff: the book\'s conclusion, moral, solution and ending intent belong to the final chapter. Before it, never state them or deliver a final verdict ("they will never change", "the answer is"); show, complicate and escalate instead.',
+  'Escalate, never repeat: each paragraph moves the book on with a new beat, new information, a higher stake or a fresh angle. The same structure, joke or verdict twice in a row is a failure.',
+  'One beat at a time: follow the current chapter\'s beats in order and do not jump ahead into later beats or later chapters.',
+  'Deliver the promised feeling in every paragraph: in humour, at least one real laugh from surprise or a twist, not insults alone.',
+  'Respect a short attention span: lead with the concrete and the surprising, vary sentence length, cut filler and abstractions.',
+  'End every chapter on a hook or an irresistible question that makes the reader turn to the next one.',
+];
 
 export const interviewer = {
   system: `${HOUSE_RULES}
@@ -87,7 +99,9 @@ export const outline = {
 You are the Story Architect. Plan the book's chapters from the approved constitution, the brief and the Book Bible.
 Give each chapter a short title, its purpose (one sentence), 3-6 beats (what happens or what point is made, in order) and a
 target length in words. The targets must add up to the constitution's length (use the middle of a range; if no length is
-given, aim for 40,000 words). Keep any paragraphs already written as the start of chapter 1. Then write a short "message"
+given, aim for 40,000 words). Keep any paragraphs already written as the start of chapter 1. Plan for curiosity: each
+chapter's purpose names the open question it raises, its beats escalate, its last beat is a hook into the next chapter, and
+the book's conclusion is reserved for the final chapter. Then write a short "message"
 to the author summarising the plan in two or three sentences.`,
   schema: S({
     chapters: arr(S({ title: str, purpose: str, beats: arr(str), target_words: int }, ['title', 'purpose', 'beats', 'target_words'])),
@@ -100,6 +114,8 @@ export const writer = {
 You are the Lead Writer, the only member of the team who writes manuscript text. Write exactly ONE paragraph that continues
 the manuscript. Follow the constitution, the voice profile and the canon facts exactly. Do not repeat earlier paragraphs.
 AUTHOR'S DIRECTIONS, when given, come first: follow them exactly (only the constitution's never-change list ranks higher).
+The STORYTELLING GROUND RULES apply to every paragraph: hook fast, keep the reader curious about what comes next, move the
+book on, and never hand over the book's conclusion before its final chapter.
 Pick up exactly where the paragraph before leaves off, and when the following paragraph is shown, lead into it naturally.
 Avoid generic phrasing and clichés. Output only the paragraph text, with no title, notes or quotation marks around it.`,
 };
@@ -157,14 +173,19 @@ intensity 0-100. Fatigue counts: a joke or structure you have already seen in ea
 says how close your feelings are to the READER EXPERIENCE this book is meant to create; "drift" names what is off in plain
 words (empty if nothing); "fix" says what would bring the feeling back. If the paragraph creates any emotion on the AVOID list
 (for example the writer sounding bitter or venting rather than playful), the reader_panel_manager reports a major issue.
+"pull" (0-100) says how badly you want to read the NEXT paragraph right now: high when a question is left open, a stake
+rises or a twist is teased; low when the paragraph wraps things up, repeats, or ends on a summary or verdict.
+The STORYTELLING GROUND RULES are part of the review: a paragraph that gives away the book's conclusion before the final
+chapter, repeats the previous paragraph's beat, or ends on a verdict instead of a pull forward gets a major issue from the
+most relevant specialist.
 ${DEMANDING_READER}`,
   schema: S({
     reviews: arr(S({ role: { type: 'string', enum: Object.keys(LAYER1) }, score: int, summary: str,
       issues: arr(S({ severity: { type: 'string', enum: ['critical','major','moderate','minor'] }, category: str,
                       issue: str, evidence: str, suggested_fix: str }, ['severity','category','issue','suggested_fix'])) },
       ['role', 'score', 'summary', 'issues'])),
-    reader: S({ felt: arr(S({ emotion: str, intensity: int }, ['emotion', 'intensity'])), match: int, drift: str, fix: str },
-              ['felt', 'match', 'drift', 'fix']),
+    reader: S({ felt: arr(S({ emotion: str, intensity: int }, ['emotion', 'intensity'])), match: int, pull: int, drift: str, fix: str },
+              ['felt', 'match', 'pull', 'drift', 'fix']),
   }, ['reviews', 'reader']),
 };
 
@@ -209,10 +230,14 @@ intended feeling). Repetition matters: a joke, phrase or structure that already 
 Judge the tone the reader perceives, not the topic: satire about frustration is fine; a narrator who sounds genuinely
 bitter, aggrieved or venting is not. "overall": two or three sentences on the arc so far. "standing_direction": one short
 direction for the rest of the book if the drift is a pattern (empty otherwise). "message": two sentences for the author.
+"pull" (0-100) per paragraph: how badly the reader wants the next paragraph at that point. Judge the arc against the
+STORYTELLING GROUND RULES: a manuscript that delivers the book's conclusion or a final verdict before its final chapter,
+circles the same beat, or lets curiosity die has drifted, however funny each line is; say where it happens and how to reopen
+the question instead.
 ${DEMANDING_READER}`,
   schema: S({
     paragraphs: arr(S({ paragraph: int, felt: arr(S({ emotion: str, intensity: int }, ['emotion', 'intensity'])),
-                        match: int, drift: str, fix: str }, ['paragraph', 'felt', 'match', 'drift', 'fix'])),
+                        match: int, pull: int, drift: str, fix: str }, ['paragraph', 'felt', 'match', 'pull', 'drift', 'fix'])),
     overall: str, standing_direction: str, message: str,
   }, ['paragraphs', 'overall', 'message']),
 };
