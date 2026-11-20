@@ -1,0 +1,4 @@
+-- Watchdog: only restarts a review when NONE is done or queued (panel or single), 10 minutes after the version was
+-- written, and then the way the app is set up (one panel call in panel mode). It used to ignore panel jobs and add
+-- five single reviews on top of a waiting panel review: duplicate work on the same allowance.
+-- (Full function body as applied on 20 Nov 2026; see app.watchdog in the database.)
