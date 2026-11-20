@@ -1,3 +1,5 @@
+import { VersionWatch } from './version-watch';
+
 export const metadata = { title: "Author's Room" };
 export const viewport = { width: 'device-width', initialScale: 1 };
 
@@ -15,7 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en-GB">
       <head><style dangerouslySetInnerHTML={{ __html: css }} /></head>
-      <body style={{ margin: 0 }}>{children}</body>
+      <body style={{ margin: 0 }}><VersionWatch />{children}</body>
     </html>
   );
 }

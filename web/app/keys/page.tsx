@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { callWorker, supabaseBrowser } from '@/lib/supabaseBrowser';
 import { Header } from '../ui';
+import { KeyGroups } from './groups';
 
 type KeyRow = {
   key_id: string; label: string; key_masked: string; status: string; project_label: string;
@@ -117,14 +118,7 @@ export default function KeysPage() {
       </p>
       {msg && <p role="status" style={{ background: '#ddf4ff', padding: 8, borderRadius: 6 }}>{msg}</p>}
 
-      <div style={{ background: '#fff8c5', border: '1px solid #9a6700', borderRadius: 8, padding: '10px 12px', margin: '12px 0' }}>
-        <b>Why some keys look idle.</b> Google sets limits per <b>project</b>, not per key. K01, K02 and K12 are one project, so they
-        share one allowance; using more of them would not add any. K03 to K21 belong to other Google projects. They are kept on
-        standby and are not used to get round the main project's limit, because that breaks Google's terms and could get the
-        projects suspended. To remove the limit, turn on billing for the main project in Google AI Studio.
-        <br /><b>Backups:</b> when every Gemini model is used up or busy, the team carries on with Mistral, Groq or OpenRouter
-        (each from its own free account, in that order). Add their keys at the bottom of this page.
-      </div>
+      <KeyGroups onChange={load} />
 
       <h2>Models — what each one did today</h2>
       <p style={{ color: '#59636e', marginTop: 0 }}>Each model has its own daily allowance in the main project. The team uses every one of them,
