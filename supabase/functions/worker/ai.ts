@@ -236,6 +236,10 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
       };
       if (req.jsonSchema) payload.response_format = { type: 'json_object' };
       if (provider === 'groq' && model.startsWith('openai/gpt-oss')) payload.reasoning_effort = 'low';
+      // per-provider tuning kept in app.settings (backup_models.params / .min_tokens), so it changes without a redeploy
+      const minTok = Number(cfg.min_tokens?.[provider] ?? 0);
+      if (minTok > payload.max_tokens) payload.max_tokens = minTok;
+      Object.assign(payload, cfg.params?.[provider] ?? {});
       const t1 = Date.now();
       let status = 0, json: any = {}, retryAfter = 0;
       try {
