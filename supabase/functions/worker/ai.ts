@@ -240,6 +240,11 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
       const minTok = Number(cfg.min_tokens?.[provider] ?? 0);
       if (minTok > payload.max_tokens) payload.max_tokens = minTok;
       Object.assign(payload, cfg.params?.[provider] ?? {});
+      // Free tiers cap tokens per request (Groq free: about 8,000 per minute, counting the reply budget too).
+      // A request above the cap can never succeed (HTTP 413), so skip that model instead of wasting a call.
+      const cap = Number(cfg.max_request_tokens?.[id] ?? 0);
+      const need = Math.ceil((system.length + req.prompt.length) / 3.5) + Number(payload.max_tokens ?? 0);
+      if (cap && need > cap) { why.push(`${provider}/${model}: request of about ${need} tokens is over its ${cap} limit`); continue; }
       const t1 = Date.now();
       let status = 0, json: any = {}, retryAfter = 0;
       try {
@@ -289,6 +294,11 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
         break;
       }
       if (status === 404) await restModel(id, 7 * 86400, 'model not available');
+      if (status === 413) {   // learn the model's real per-request limit from the error, for next time
+        const lim = Number((msg.match(/Limit\s+(\d+)/i) ?? [])[1] ?? 0);
+        if (lim) { cfg.max_request_tokens = { ...(cfg.max_request_tokens ?? {}), [id]: lim };
+          await app.from('settings').update({ value: JSON.stringify(cfg) }).eq('key', 'backup_models'); }
+      }
       // 400/413/422 (request too large for this model), 5xx, timeouts: try the next model
     }
   }
