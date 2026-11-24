@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p8-v1';
+export const PROMPT_VERSION = 'p9-v1';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -19,7 +19,13 @@ const DEMANDING_READER = `Be a demanding reader, not a polite one. Check specifi
   tires of it by the third time, even if the author asked for that device. The fix is to vary HOW the device is used (new
   angle, new form, a twist), never to drop the author's device.
 - Formula endings: a rhetorical question at the end of paragraph after paragraph reads as a tic and kills pull.
+- Repetition across the WHOLE manuscript, not just the paragraph before: anything this paragraph shares with ANY other
+  paragraph shown (earlier or later): a gag, image, anecdote, explanation, restated backstory, a 3+ word phrase or the same
+  sentence pattern, is a major issue; quote it and name the other paragraph's number. The same joke in new words still counts.
+- Continuity of events: referring to an object, place, scene or line of dialogue before the paragraph that introduces it,
+  or a timeline that does not follow, is a critical issue.
 - The DIRECTION CONTRACT: anything that contradicts it is a major issue, however well written.
+- Quotability: say whether the paragraph has one fresh line a reader would want to share; a paragraph with none cannot match above 85.
 A match of 85 or more means a real reader would happily quote this paragraph to a friend.`;
 
 // Reader rules that depend on the book's genre (Document 4: genre-specific evaluation; never one formula for all books).
@@ -45,20 +51,25 @@ export function genreRubric(genre: string): string {
   const g = (genre ?? '').toLowerCase();
   let rows: [string, number][], fails: string[];
   if (/humou?r|comed|satir|funny|parod|\bwit(ty)?\b/.test(g)) {
-    rows = [['Real laughs from surprise, twist or punchline', 25], ['Voice: amused, in control, true to the narrator', 20],
-            ['Fidelity to the author\'s spine, analogy and DIRECTION CONTRACT', 20], ['Freshness: no repeated device, word, metaphor or ending', 15],
-            ['Pull: the reader must read on (varied endings)', 10], ['Clarity, rhythm and economy', 10]];
+    rows = [['Real laughs from surprise, twist or punchline', 25], ['Voice: amused, in control, true to the narrator', 15],
+            ['Fidelity to the author\'s spine, analogy and DIRECTION CONTRACT', 15], ['Freshness: nothing (gag, image, phrase, explanation, sentence pattern) repeated from ANY other paragraph', 20],
+            ['Quotable line: one fresh, shareable line earned by the scene', 10], ['Pull: the reader must read on (varied endings)', 10], ['Clarity, rhythm and economy', 5]];
     fails = ['the narrator sounds bitter, aggrieved or venting', 'contradicts the DIRECTION CONTRACT or replaces the author\'s analogy',
+             'repeats a gag, image, explanation or scene already used in another paragraph', 'refers to an event or object before it is introduced',
              'mocks people for who they are (caste, religion, gender, disability) rather than for behaviour', 'text is cut off or incomplete'];
   } else if (/thrill|myster|suspense|psycholog|literary|coming|drama|philosoph|romance|romantic|fiction|novel/.test(g)) {
-    rows = [['Emotional truth and interiority', 25], ['Mystery control: clues fair, nothing resolved early', 20],
-            ['Prose: concrete sensory detail, subtext over statement', 15], ['Continuity: timeline, POV and facts clean', 15],
-            ['Fidelity to the DIRECTION CONTRACT and author\'s directions', 15], ['Pull: the reader must read on (varied endings)', 10]];
+    rows = [['Emotional truth and interiority', 20], ['Mystery control: clues fair, nothing resolved early', 15],
+            ['Prose: concrete sensory detail, subtext over statement', 10], ['Continuity: timeline, POV, facts and order of events clean', 15],
+            ['Freshness and progress: moves the story on; no image, phrase or backstory repeated from ANY other paragraph', 15],
+            ['Fidelity to the DIRECTION CONTRACT and author\'s directions', 10], ['Quotable line: one fresh, resonant line earned by the scene', 5],
+            ['Pull: the reader must read on (varied endings)', 10]];
     fails = ['explains or resolves the central mystery', 'mocks or trivialises the protagonist\'s pain or trauma',
+             'repeats an image, scene or backstory already given in another paragraph', 'refers to an event or object before it is introduced',
              'merges or confuses the two timelines', 'contradicts the DIRECTION CONTRACT', 'text is cut off or incomplete'];
   } else {
-    rows = [['Insight the reader can use', 25], ['Accuracy: no invented facts, statistics or quotations', 20], ['Voice', 15],
-            ['Structure and flow', 15], ['Engagement and pull', 15], ['Fidelity to the DIRECTION CONTRACT', 10]];
+    rows = [['Insight the reader can use', 25], ['Accuracy: no invented facts, statistics or quotations', 20], ['Voice', 10],
+            ['Structure and flow', 10], ['Freshness: no point or example repeated from another paragraph', 10],
+            ['Quotable line: one fresh, shareable line', 10], ['Engagement and pull', 10], ['Fidelity to the DIRECTION CONTRACT', 5]];
     fails = ['invents a fact, statistic or quotation', 'contradicts the DIRECTION CONTRACT', 'text is cut off or incomplete'];
   }
   return `SCORING SHEET (100 points; score every paragraph against it):\n${rows.map(([k, v]) => `- ${k}: ${v}`).join('\n')}\n` +
@@ -76,6 +87,9 @@ export const DEFAULT_CRAFT = [
   'Deliver the promised feeling in every paragraph: in humour, at least one real laugh from surprise or a twist, not insults alone.',
   'Respect a short attention span: lead with the concrete and the surprising, vary sentence length, cut filler and abstractions.',
   'End every chapter on a hook or an irresistible question that makes the reader turn to the next one.',
+  'Never repeat anywhere in the book: no gag, image, anecdote, explanation, piece of backstory, line of dialogue or sentence pattern may appear in two paragraphs, even in different words. Each paragraph carries one new beat that no other paragraph carries.',
+  'Continuity: events happen in order. Never refer to an object, place, scene, person or line of dialogue before the paragraph that introduces it, and never restate what the reader already knows.',
+  'Quotable line: every paragraph carries one fresh line a reader would want to screenshot and share, earned by the scene and in the book\'s voice. Never a cliche, a slogan, or a line the book has already used.',
 ];
 
 export const interviewer = {
@@ -162,7 +176,10 @@ The DIRECTION CONTRACT and the AUTHOR'S DIRECTIONS, when given, come first: foll
 never-change list ranks higher). Write to this book's GENRE READER RULES, not another genre's.
 The STORYTELLING GROUND RULES apply to every paragraph: hook fast, keep the reader curious about what comes next, move the
 book on, and never hand over the book's conclusion before its final chapter.
-Pick up exactly where the paragraph before leaves off, and when the following paragraph is shown, lead into it naturally.
+Pick up exactly where the paragraph before leaves off, and when later paragraphs are shown, lead into the next one naturally.
+Never reuse anything from ANY other paragraph shown, earlier or later: no gag, image, anecdote, explanation, backstory, phrase or
+sentence pattern (for example, do not build every paragraph as "Externally... Internally..."). Do not mention anything before the
+paragraph that introduces it. Give the paragraph one fresh line a reader would want to quote, earned by the scene.
 Avoid generic phrasing and clichés. Output only the paragraph text, with no title, notes or quotation marks around it.`,
 };
 
@@ -291,4 +308,30 @@ ${DEMANDING_READER}`,
                         match: int, pull: int, drift: str, fix: str }, ['paragraph', 'felt', 'match', 'pull', 'drift', 'fix'])),
     overall: str, standing_direction: str, message: str,
   }, ['paragraphs', 'overall', 'message']),
+};
+
+// Whole-chapter continuity and repetition audit: reads every paragraph in order and gives each one its own job.
+export const continuityAudit = {
+  system: `${HOUSE_RULES}
+You are the Chief Editor reading the whole manuscript so far, in order, as one continuous piece. Your job is to remove
+repetition and continuity breaks and to make every paragraph earn its place. For EVERY paragraph give:
+- "job": the ONE story beat or idea that only this paragraph carries. No two paragraphs may share a job; together the jobs must
+  follow the chapter plan in a causal order, each moving the book on. Where several paragraphs say the same thing, give the
+  idea to the best one and a NEW job (the next beat in the plan) to the others.
+- "repeats": everything in it that repeats another paragraph (a gag, image, anecdote, explanation, backstory, phrase or sentence
+  pattern, even in different words); quote the words and name the other paragraph's number. Empty if none.
+- "continuity": any break: something referred to before the paragraph that introduces it, a timeline that does not follow,
+  a contradiction. Empty if none.
+- "quotable": the best existing line worth sharing, or a concrete idea for one that fits this paragraph's job and the voice.
+- "action": "keep" only when the paragraph has its own job, no repeats, no continuity break and a quotable line; else "rework".
+- "instruction": precise rework instructions for the writer (what to cut, what new beat to carry, what to keep).
+Respect the DIRECTION CONTRACT and the author's directions above all. "patterns": habits that run across the chapter (a
+repeated sentence structure, a character who does the same thing every paragraph, an explanation restated). "message": two
+sentences for the author.`,
+  schema: S({
+    paragraphs: arr(S({ paragraph: int, job: str, repeats: str, continuity: str, quotable: str,
+                        action: { type: 'string', enum: ['keep', 'rework'] }, instruction: str },
+                      ['paragraph', 'job', 'repeats', 'continuity', 'quotable', 'action', 'instruction'])),
+    patterns: arr(str), message: str,
+  }, ['paragraphs', 'patterns', 'message']),
 };

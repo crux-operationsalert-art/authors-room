@@ -112,12 +112,13 @@ async function neighbours(db: SupabaseClient, bookId: string, blockId: string) {
   const i = all.findIndex(b => b.id === blockId);
   const txt = (b: any) => b.block_versions?.text ?? '';
   const before = all.slice(0, i < 0 ? all.length : i).map(txt).filter(Boolean);
-  const after = i < 0 ? [] : all.slice(i + 1).map(txt).filter(Boolean).slice(0, 1);
+  const after = i < 0 ? [] : all.slice(i + 1).map(txt).filter(Boolean);   // every later paragraph, so nothing in them is repeated
   return { before, after, number: i + 1 };
 }
 function aroundText(n: { before: string[]; after: string[] }, label = 'PARAGRAPHS BEFORE THIS ONE') {
   return `${label} (${n.before.length}, last 8 shown):\n${n.before.slice(-8).join('\n\n') || '(none: this opens the book)'}\n\n` +
-    (n.after.length ? `THE PARAGRAPH THAT FOLLOWS (this one must lead into it naturally):\n${n.after[0]}\n\n` : '');
+    (n.after.length ? `LATER PARAGRAPHS, ALREADY WRITTEN (${n.after.length}; this one must lead naturally into the first, and must not repeat ` +
+      `or anticipate anything in any of them):\n${n.after.slice(0, 15).map((t, k) => `[next ${k + 1}] ${t}`).join('\n\n')}\n\n` : '');
 }
 // The author's open notes: whole-book directions plus notes on this paragraph.
 async function directions(db: SupabaseClient, bookId: string, blockId?: string) {
@@ -531,6 +532,62 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'extract_facts', p_role: 'continuity_manager',
       p_priority: 70, p_payload: { block_id, block_version_id } });
     return { decision: 'pass', score: o.overall_score, instructions: o.instructions, summary: o.summary, rubric: o.rubric ?? null, critical_failures: critical };
+  }
+
+  if (key === 'chapter/continuity_audit') {
+    // Whole-chapter read for repetition and continuity; replaces the book's open revision plans with one plan, in
+    // reading order, where every paragraph gets its own job and precise rework instructions.
+    const ctx = await bookContext(db, job.book_id);
+    const { data: rows } = await db.from('manuscript_blocks').select('id, status, block_versions!manuscript_blocks_current_fk(text)')
+      .eq('book_id', job.book_id).neq('status', 'cut').order('order_key');
+    const all = ((rows ?? []) as any[]).filter(b => b.block_versions?.text);
+    if (!all.length) return { skipped: 'nothing written yet' };
+    const dirs = await directions(db, job.book_id);
+    const craft = await craftText(db, job.book_id);
+    const prof = await emotionProfile(db, job, base);
+    const { data: unitRows } = await db.from('manuscript_blocks').select('unit_id').eq('book_id', job.book_id).not('unit_id', 'is', null).limit(1);
+    const place = await placeInPlan(db, job.book_id, (unitRows as any[])?.[0]?.unit_id ?? null);
+    const planText = place.list.length ? `CHAPTER PLAN:\n${place.list.map((c: any, i: number) => `${i + 1}. ${c.title}: ${c.purpose ?? ''}\n   Beats: ${(c.beats ?? []).join(' | ')}`).join('\n')}\n\n` : '';
+    // notes already raised by earlier audits (e.g. reader-emotion), so nothing useful is lost
+    const { data: openItems } = await db.from('revision_plan_items').select('block_id, instruction, revision_plans!inner(book_id, status)')
+      .eq('revision_plans.book_id', job.book_id).eq('revision_plans.status', 'active').in('status', ['pending', 'active']);
+    const earlier = ((openItems ?? []) as any[]).map(it => ({ n: all.findIndex(b => b.id === it.block_id) + 1, note: String(it.instruction).slice(0, 400) }))
+      .filter(x => x.n > 0 && !/^Top-down re-audit/.test(x.note)).sort((a, b) => a.n - b.n);
+    const r = await generate(db, { ...base, system: R.continuityAudit.system, jsonSchema: R.continuityAudit.schema, temperature: 0.2, maxOutputTokens: 12000,
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons, place.list.length > 1)}\n\n${planText}${craft}${experienceText(prof)}${dirs}` +
+              (earlier.length ? `EARLIER READER NOTES (still valid; fold them into your instructions):\n${earlier.map(e => `- ¶${e.n}: ${e.note}`).join('\n')}\n\n` : '') +
+              `MANUSCRIPT (${all.length} paragraphs, in reading order):\n${all.map((b, i) => `[${i + 1}] ${b.block_versions.text}`).join('\n\n')}` });
+    const o = parse(r.text);
+    const byN = new Map<number, any>((o.paragraphs ?? []).map((p: any) => [Number(p.paragraph), p]));
+    const patterns = ((o.patterns ?? []) as any[]).map(String).filter(x => x.trim());
+    // replace open plans and park their in-flight paragraph work, then plan every paragraph in reading order
+    await db.from('revision_plans').update({ status: 'cancelled', finished_at: new Date().toISOString() }).eq('book_id', job.book_id).eq('status', 'active');
+    await db.from('agent_jobs').update({ status: 'cancelled', updated_at: new Date().toISOString() }).eq('book_id', job.book_id)
+      .eq('workflow', 'paragraph').in('step', ['revise', 'review', 'review_panel', 'consolidate']).in('status', ['queued', 'waiting_quota', 'failed']);
+    const { data: plan, error: planErr } = await db.from('revision_plans').insert({ book_id: job.book_id, note_id: null, source: 'continuity_audit' }).select('id').single();
+    if (planErr || !plan) throw new Error(`Could not create the revision plan: ${planErr?.message}`);
+    const items = all.map((b, i) => {
+      const p = byN.get(i + 1) ?? {};
+      const instr = [`Whole-chapter continuity and repetition audit (paragraph ${i + 1} of ${all.length}).`,
+        `THIS PARAGRAPH'S ONLY JOB: ${p.job ?? 'keep its current beat'}`,
+        p.repeats ? `REMOVE THESE REPEATS: ${p.repeats}` : '',
+        p.continuity ? `FIX CONTINUITY: ${p.continuity}` : '',
+        p.quotable ? `QUOTABLE LINE: ${p.quotable}` : '',
+        p.instruction ? `EDITOR'S INSTRUCTIONS: ${p.instruction}` : '',
+        patterns.length ? `CHAPTER-WIDE HABITS TO BREAK: ${patterns.join('; ')}` : '',
+        'Keep everything that already works: the voice, the facts, the author\'s directions.'].filter(Boolean).join('\n');
+      return { plan_id: (plan as any).id, block_id: b.id, instruction: instr, priority: 92 };
+    });
+    const { error: itErr } = await db.from('revision_plan_items').insert(items);
+    if (itErr) throw new Error(`Could not save the plan items: ${itErr.message}`);
+    if (patterns.length) await db.from('author_notes').insert({ book_id: job.book_id, scope: 'book',
+      note: `(Continuity audit) Avoid these habits for the rest of the book: ${patterns.join('; ')}` });
+    const rework = all.map((_, i) => byN.get(i + 1)).filter((p: any) => p && p.action !== 'keep').length;
+    await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant',
+      content: `Continuity and repetition audit of ${all.length} paragraphs. ${o.message ?? ''}\n` +
+               `Every paragraph now has its own job; ${rework} need real rework. The team works through them one at a time from paragraph 1.` +
+               (patterns.length ? `\nHabits to break: ${patterns.join('; ')}` : '') });
+    return { paragraphs: all.length, rework, patterns };
   }
 
   if (key === 'emotion/audit') {
