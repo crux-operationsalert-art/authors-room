@@ -1,7 +1,7 @@
 'use client';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { app, kick, supabaseBrowser } from '@/lib/supabaseBrowser';
+import { app, kick, supabaseBrowser, BASE } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page, Status } from '../ui';
 import { ActivityPanel, NextStep } from '../activity';
 import { GroundRules, MoodMeter, ParagraphMood, ProgressCard, latestReading, type Progress, type Reading } from '../meters';
@@ -38,6 +38,7 @@ function Workspace() {
   const [readings, setReadings] = useState<Reading[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [quality, setQuality] = useState<any>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [rules, setRules] = useState<string[]>([]);
   const [bookNote, setBookNote] = useState('');
   const [runs, setRuns] = useState<any[]>([]);
@@ -71,6 +72,8 @@ function Workspace() {
       app().rpc('craft_rules'),
       app().rpc('quality_scores', { p_book: id }),
     ]);
+    if (b.error || !b.data) { setLoadErr(b.error?.message ?? 'not found'); return; }
+    setLoadErr(null);
     setBook(b.data); setMsgs((m.data ?? []) as Msg[]); setDecisions((d.data ?? []) as Decision[]); setCons(c.data);
     setEnts(e.data ?? []); setBlocks((bl.data ?? []) as any); setIssues((is.data ?? []) as Issue[]);
     setReviews((rv.data ?? []) as Review[]); setJobs(j.data ?? []);
@@ -146,7 +149,10 @@ function Workspace() {
     save(`${book.working_title.replace(/[^\w\- ]+/g, '')}.md`, text, 'text/markdown');
   }
 
-  if (!book) return <main style={page}><Header /><p>Loading…</p></main>;
+  if (!book) return <main style={page}><Header />{loadErr
+    ? <div style={card}><p style={{ marginTop: 0 }}>This book could not be opened. You may be signed out, or the link may be wrong.</p>
+        <a href={`${BASE}/`} style={{ ...btnPrimary, textDecoration: 'none', display: 'inline-block' }}>Go to Books and sign in</a></div>
+    : <p>Loading…</p>}</main>;
   const failed = jobs.filter(j => j.status === 'failed');
   const activeJobs = jobs.filter(j => j.status !== 'failed');
   const busy = activeJobs.length > 0;

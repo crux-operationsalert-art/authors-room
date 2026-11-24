@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "build:pages": "NEXT_PUBLIC_BASE_PATH=/authors-room next build && node scripts/check-pages-build.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",
