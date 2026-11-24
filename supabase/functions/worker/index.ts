@@ -80,7 +80,7 @@ async function bookContext(db: SupabaseClient, bookId: string) {
     db.from('book_constitutions').select('*').eq('book_id', bookId).order('version', { ascending: false }).limit(1).single(),
     db.from('author_voice_profiles').select('*').eq('book_id', bookId).maybeSingle(),
     db.from('entities').select('type, name, profile').eq('book_id', bookId).neq('status', 'retired'),
-    db.from('canon_facts').select('statement').eq('book_id', bookId).neq('status', 'retired').order('created_at').limit(200),
+    db.schema('app').rpc('book_facts', { p_book: bookId, p_limit: 200 }),
   ]);
   return { book, cons, voice, ents: ents ?? [], facts: facts ?? [] };
 }
@@ -123,8 +123,9 @@ async function directions(db: SupabaseClient, bookId: string, blockId?: string) 
   const [{ data }, { data: bk }] = await Promise.all([
     db.from('author_notes').select('scope, note, block_id').eq('book_id', bookId).eq('status', 'open').order('created_at'),
     db.from('books').select('direction_contract').eq('id', bookId).maybeSingle()]);
+  const { data: reg } = await db.schema('app').rpc('repetition_register', { p_book: bookId });
   const list = (data ?? []).filter((n: any) => n.scope === 'book' || (blockId && n.block_id === blockId));
-  return contractText((bk as any)?.direction_contract) + (list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
+  return contractText((bk as any)?.direction_contract) + String(reg ?? '') + (list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
     `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '');
 }
 // The book's Direction Contract: author-approved creative decisions that every agent must honour.
@@ -504,13 +505,15 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const o = parse(r.text);
     const blocking = (issues ?? []).some((i: any) => i.severity === 'critical' || i.severity === 'major');
     // A critical/major issue always forces revision; otherwise only a weak overall score does (minor notes are kept for the author).
-    const revise = blocking || (o.decision === 'revise' && Number(o.overall_score) < 80);
+    const critical = (o.critical_failures ?? []).map(String).filter((x: string) => x.trim());
+    const revise = blocking || critical.length > 0 || (o.decision === 'revise' && Number(o.overall_score) < 80);
+    if (critical.length) o.instructions = `CRITICAL FAILURES to fix first: ${critical.join('; ')}.\n${o.instructions ?? ''}`;
     if (revise && loop < 2) {
       await app.rpc('set_block_status', { p_block_id: block_id, p_status: 'revision_requested' });
       await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'revise', p_role: 'lead_writer',
         p_priority: 90, p_payload: { block_id, instructions: o.instructions, loop: loop + 1 } });
       await db.from('editorial_issues').update({ status: 'accepted' }).eq('block_version_id', block_version_id).in('severity', ['critical', 'major']);
-      return { decision: 'revise', loop: loop + 1, score: o.overall_score, instructions: o.instructions, summary: o.summary };
+      return { decision: 'revise', loop: loop + 1, score: o.overall_score, instructions: o.instructions, summary: o.summary, rubric: o.rubric ?? null, critical_failures: critical };
     }
     if (revise) {
       // two loops used: the author decides (Brief: no silent acceptance)
@@ -520,13 +523,13 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
         recommendation: o.summary + (o.disagreements ? `\nReviewers disagreed: ${o.disagreements}` : '') });
       await app.rpc('set_block_status', { p_block_id: block_id, p_status: 'qc_passed' });
       await note(db, job.book_id, 'A paragraph needs your decision: the team could not clear every serious issue in two revisions.');
-      return { decision: 'escalated', score: o.overall_score, instructions: o.instructions, summary: o.summary };
+      return { decision: 'escalated', score: o.overall_score, instructions: o.instructions, summary: o.summary, rubric: o.rubric ?? null, critical_failures: critical };
     }
     await app.rpc('set_block_status', { p_block_id: block_id, p_status: 'qc_passed' });
     await db.from('editorial_issues').update({ status: 'deferred' }).eq('block_version_id', block_version_id).eq('status', 'open');
     await app.rpc('enqueue', { p_book: job.book_id, p_workflow: 'paragraph', p_step: 'extract_facts', p_role: 'continuity_manager',
       p_priority: 70, p_payload: { block_id, block_version_id } });
-    return { decision: 'pass', score: o.overall_score, instructions: o.instructions, summary: o.summary };
+    return { decision: 'pass', score: o.overall_score, instructions: o.instructions, summary: o.summary, rubric: o.rubric ?? null, critical_failures: critical };
   }
 
   if (key === 'emotion/audit') {

@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p7-v1';
+export const PROMPT_VERSION = 'p8-v1';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -37,7 +37,33 @@ export function genreReaderRules(genre: string): string {
   if (/self-help|motivat|non-?fiction|guide|business|memoir/.test(g)) rules.push(
     'Non-fiction/self-help: every paragraph gives the reader something true and usable or a sharper way to see their own life; no padding, no invented facts or statistics.');
   if (!rules.length) rules.push('Judge against the READER EXPERIENCE this book promises; do not import rules from other genres.');
-  return `GENRE READER RULES (for this book's genre: ${genre || 'unspecified'}):\n${rules.map(r => `- ${r}`).join('\n')}\n\n`;
+  return `GENRE READER RULES (for this book's genre: ${genre || 'unspecified'}):\n${rules.map(r => `- ${r}`).join('\n')}\n\n` + genreRubric(genre);
+}
+
+// 100-point scoring sheet per genre, with critical failures that force a revision whatever the score (Document 4, Part C).
+export function genreRubric(genre: string): string {
+  const g = (genre ?? '').toLowerCase();
+  let rows: [string, number][], fails: string[];
+  if (/humou?r|comed|satir|funny|parod|\bwit(ty)?\b/.test(g)) {
+    rows = [['Real laughs from surprise, twist or punchline', 25], ['Voice: amused, in control, true to the narrator', 20],
+            ['Fidelity to the author\'s spine, analogy and DIRECTION CONTRACT', 20], ['Freshness: no repeated device, word, metaphor or ending', 15],
+            ['Pull: the reader must read on (varied endings)', 10], ['Clarity, rhythm and economy', 10]];
+    fails = ['the narrator sounds bitter, aggrieved or venting', 'contradicts the DIRECTION CONTRACT or replaces the author\'s analogy',
+             'mocks people for who they are (caste, religion, gender, disability) rather than for behaviour', 'text is cut off or incomplete'];
+  } else if (/thrill|myster|suspense|psycholog|literary|coming|drama|philosoph|romance|romantic|fiction|novel/.test(g)) {
+    rows = [['Emotional truth and interiority', 25], ['Mystery control: clues fair, nothing resolved early', 20],
+            ['Prose: concrete sensory detail, subtext over statement', 15], ['Continuity: timeline, POV and facts clean', 15],
+            ['Fidelity to the DIRECTION CONTRACT and author\'s directions', 15], ['Pull: the reader must read on (varied endings)', 10]];
+    fails = ['explains or resolves the central mystery', 'mocks or trivialises the protagonist\'s pain or trauma',
+             'merges or confuses the two timelines', 'contradicts the DIRECTION CONTRACT', 'text is cut off or incomplete'];
+  } else {
+    rows = [['Insight the reader can use', 25], ['Accuracy: no invented facts, statistics or quotations', 20], ['Voice', 15],
+            ['Structure and flow', 15], ['Engagement and pull', 15], ['Fidelity to the DIRECTION CONTRACT', 10]];
+    fails = ['invents a fact, statistic or quotation', 'contradicts the DIRECTION CONTRACT', 'text is cut off or incomplete'];
+  }
+  return `SCORING SHEET (100 points; score every paragraph against it):\n${rows.map(([k, v]) => `- ${k}: ${v}`).join('\n')}\n` +
+    `CRITICAL FAILURES (any one forces a revision whatever the score; list each one found in "critical_failures"):\n${fails.map(f => `- ${f}`).join('\n')}\n` +
+    `Calibrate honestly: 90+ means a professional editor would publish it unchanged; most good first drafts score 75-85.\n\n`;
 }
 
 // Storytelling ground rules for every book (the live list is app.settings 'craft_rules'; this is the fallback).
@@ -165,9 +191,13 @@ export const consolidate = {
   system: `${HOUSE_RULES}
 You are the Chief Editor. Five reviewers have independently assessed one paragraph. Consolidate their findings: remove
 duplicates, drop findings without evidence, resolve disagreements (and say where reviewers disagree), and write precise
-revision instructions for the Lead Writer. Decide "revise" if any critical or major issue stands, else "pass".`,
+revision instructions for the Lead Writer. Score the paragraph against the SCORING SHEET: fill "rubric" with each line's
+points, and make "overall_score" their sum. List in "critical_failures" every CRITICAL FAILURE you find (empty if none).
+Decide "revise" if any critical failure, critical issue or major issue stands, else "pass".`,
   schema: S({ decision: { type: 'string', enum: ['revise', 'pass'] }, summary: str, instructions: str,
-              disagreements: str, overall_score: int }, ['decision', 'summary', 'instructions', 'overall_score']),
+              disagreements: str, overall_score: int,
+              rubric: arr(S({ criterion: str, score: int, max: int }, ['criterion', 'score', 'max'])),
+              critical_failures: arr(str) }, ['decision', 'summary', 'instructions', 'overall_score', 'critical_failures']),
 };
 
 export const facts = {

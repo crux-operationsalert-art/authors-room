@@ -37,6 +37,7 @@ function Workspace() {
   const [notesList, setNotesList] = useState<any[]>([]);
   const [readings, setReadings] = useState<Reading[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [quality, setQuality] = useState<any>(null);
   const [rules, setRules] = useState<string[]>([]);
   const [bookNote, setBookNote] = useState('');
   const [runs, setRuns] = useState<any[]>([]);
@@ -48,7 +49,7 @@ function Workspace() {
 
   const load = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr, cr] = await Promise.all([
+    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr, cr, qs] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
       sb.from('decisions').select('*').eq('book_id', id).eq('status', 'pending').order('created_at'),
@@ -68,6 +69,7 @@ function Workspace() {
       sb.from('reader_emotions').select('block_id, block_version_id, source, felt, match, pull, drift, fix, created_at').eq('book_id', id).order('created_at', { ascending: false }).limit(600),
       app().rpc('book_progress', { p_book: id }),
       app().rpc('craft_rules'),
+      app().rpc('quality_scores', { p_book: id }),
     ]);
     setBook(b.data); setMsgs((m.data ?? []) as Msg[]); setDecisions((d.data ?? []) as Decision[]); setCons(c.data);
     setEnts(e.data ?? []); setBlocks((bl.data ?? []) as any); setIssues((is.data ?? []) as Issue[]);
@@ -75,6 +77,7 @@ function Workspace() {
     setAllJobs(aj.data ?? []); setRuns(ar.data ?? []); setUnits(ou.data ?? []); setApprovals(ap.data ?? []); setNotesList(an.data ?? []);
     setReadings((re.data ?? []) as Reading[]); if (!pr.error) setProgress(pr.data as Progress);
     if (!cr.error && Array.isArray(cr.data)) setRules(cr.data as string[]);
+    if (!qs.error) setQuality(qs.data);
   }, [sb, id]);
 
   useEffect(() => {
@@ -340,6 +343,9 @@ function Workspace() {
               <div key={b.id}>
               {firstOfCh && <h3 style={{ margin: '18px 0 8px' }}>Chapter {chapters.indexOf(ch!) + 1}: {ch!.title}
                 {ch!.target_words ? <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}> · {wordsIn(ch!.id).toLocaleString('en-IN')} / {ch!.target_words.toLocaleString('en-IN')} words</span> : null}
+                {quality?.chapters?.[ch!.id]?.score != null && <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}
+                  title="Chief Editor's score on the genre scoring sheet, simulated reader feeling and page-turn pull (averages for the current text)">
+                  {' '}· quality {quality.chapters[ch!.id].score} · feeling {quality.chapters[ch!.id].feel ?? '—'} · pull {quality.chapters[ch!.id].pull ?? '—'}</span>}
                 {ch!.author_approved_at ? <span style={{ fontSize: 13, color: C.ok, fontWeight: 400 }}> · ✓ Chapter approved by you</span>
                   : ch!.status === 'reviewed' ? <button style={{ ...btnPrimary, marginLeft: 10, fontSize: 13 }}
                       onClick={() => { if (confirm('Approve every paragraph in this chapter and let the team continue?')) run(app().rpc('approve_chapter', { p_chapter: ch!.id })); }}>
