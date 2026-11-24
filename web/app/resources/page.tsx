@@ -31,7 +31,7 @@ export default function Resources() {
       sb.from('quota_events').select('*').order('at', { ascending: false }).limit(15),
       sb.from('provisioning_log').select('*').order('at', { ascending: false }).limit(25)]);
     const firstErr = [s, p, k, q].find(x => x.error)?.error;
-    setErr(firstErr ? firstErr.message : null);
+    setErr(firstErr ? (/permission denied|JWT|not allowed/i.test(firstErr.message) ? 'You are signed out. Sign in on the Books page, then come back here.' : firstErr.message) : null);
     setStatus(s.data); setProjects(p.data ?? []); setKeys((k.data ?? []) as any[]); setPools((q.data ?? []) as any[]);
     setEvents(e.data ?? []); setLogRows(l.data ?? []);
   }, [sb]);

@@ -21,6 +21,7 @@ export default function Dashboard() {
   const [work, setWork] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [signedOut, setSignedOut] = useState(false);
 
   const load = useCallback(async () => {
     const { data: books, error } = await sb.from('books').select('*').order('created_at', { ascending: false });
@@ -39,6 +40,7 @@ export default function Dashboard() {
       waiting: js.filter(j => j.status === 'waiting_quota').length, soonest,
       pendingParas: js.filter(j => ['draft', 'revise', 'review_panel', 'consolidate'].includes(j.step)).length,
       bottleneck: js.find(j => j.status === 'waiting_quota')?.last_error ?? null });
+    setSignedOut(!!k5.error && /permission denied|JWT|not allowed/i.test(k5.error.message));
     setRows(out); setAll(a.data); setModels((m.data ?? []) as any[]); setKpi(k5.data); setBudget(bs.data); setLoaded(true);
   }, [sb]);
   useEffect(() => { load(); const t = setInterval(load, 60_000); return () => clearInterval(t); }, [load]);
@@ -53,8 +55,9 @@ export default function Dashboard() {
       <Header><span style={{ fontSize: 13, color: C.muted }}>Dashboard</span></Header>
       {err && <p role="alert" style={{ ...card, borderColor: C.bad, color: C.bad }}>{err}</p>}
       {!loaded && <p>Loading…</p>}
+      {signedOut && <p role="alert" style={{ ...card, borderColor: C.bad }}>You are signed out, so nothing below is real data. Sign in on the Books page, then come back.</p>}
 
-      {work && (
+      {work && !signedOut && (
         <div style={card}>
           <h2 style={{ marginTop: 0 }}>Workload now</h2>
           <p style={{ margin: 0, fontSize: 14 }}>
