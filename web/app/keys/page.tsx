@@ -55,17 +55,18 @@ export default function KeysPage() {
     // per-model use today (Pacific day, as Google counts it) and which models are resting until their reset
     const dayStart = new Date(); const pt = new Date(dayStart.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
     const since = new Date(Date.now() - ((pt.getHours() * 60 + pt.getMinutes()) * 60 + pt.getSeconds()) * 1000).toISOString();
-    const [runs, rest, reg] = await Promise.all([
+    const [runs, rest, reg, prest] = await Promise.all([
       sb.from('agent_runs').select('model_id, status').gte('created_at', since).limit(5000),
       sb.from('model_rest').select('model_id, until, reason'),
       sb.from('model_registry').select('tier, model_id, fallbacks').eq('enabled', true),
+      sb.from('project_model_rest').select('model_id, until, reason'),
     ]);
     const ids = new Set<string>();
     for (const r of (reg.data ?? []) as any[]) { ids.add(r.model_id); for (const f of r.fallbacks ?? []) ids.add(f.model_id); }
     ids.delete('gemini-embedding-001');
     setModels([...ids].map(id => {
       const rr = ((runs.data ?? []) as any[]).filter(x => x.model_id === id);
-      const rs = ((rest.data ?? []) as any[]).find(x => x.model_id === id && Date.parse(x.until) > Date.now());
+      const rs = ([...((rest.data ?? []) as any[]), ...((prest.data ?? []) as any[])]).find(x => x.model_id === id && Date.parse(x.until) > Date.now());
       return { id, ok: rr.filter(x => x.status === 'ok').length, refused: rr.filter(x => x.status === 'rate_limited').length,
                busy: rr.filter(x => x.status === 'error').length, rest: rs };
     }).sort((a, b) => b.ok - a.ok));

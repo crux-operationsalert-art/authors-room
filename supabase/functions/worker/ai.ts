@@ -34,16 +34,6 @@ const isDailyLimit = (msg: string) => /per ?day|PerDay|requests per day/i.test(m
 
 async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs = 100_000): Promise<GenerateResult> {
   const app = db.schema('app');
-  const { data: project } = await db.from('ai_projects').select('id, usage_tier').eq('is_active', true).single();
-  if (!project) throw new PolicyError('No active Gemini project.');
-
-  if (req.bookId) {
-    const { data: book } = await db.from('books').select('privacy_mode').eq('id', req.bookId).single();
-    if (book?.privacy_mode === 'confidential' && project.usage_tier === 'free') {
-      throw new PolicyError('This book is confidential and the Gemini project is on the free tier. ' +
-        'Move the project to a paid tier, or mark the book as standard in its settings.');
-    }
-  }
   const cap = Number(Deno.env.get('DAILY_COST_CAP_USD') ?? '5');
   const { data: spent } = await app.rpc('cost_today_usd');
   if (Number(spent ?? 0) >= cap) throw new PolicyError(`Daily cost cap of $${cap} reached.`);
@@ -51,49 +41,43 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
   const { data: model } = await db.from('model_registry')
     .select('model_id, input_price_per_mtok, output_price_per_mtok, fallbacks').eq('tier', req.tier).eq('enabled', true).single();
   if (!model) throw new PolicyError(`No enabled model for tier "${req.tier}".`);
-  // Fallbacks are used when a model is unavailable (5xx / timeout / 404) or its own DAILY limit is used up.
+  // The tier's quality order: main model first, then its fallbacks.
   const chain = [{ id: model.model_id, pin: Number(model.input_price_per_mtok), pout: Number(model.output_price_per_mtok) },
     ...((model.fallbacks ?? []) as any[]).map(f => ({ id: String(f.model_id), pin: Number(f.in ?? 0), pout: Number(f.out ?? 0) }))];
-
-  // Skip models that are resting (daily limit used up, or retired) until their reset.
-  const { data: rest } = await db.from('model_rest').select('model_id, until').gt('until', new Date().toISOString());
-  const resting = new Map<string, number>(((rest ?? []) as any[]).map(r => [String(r.model_id), Date.parse(r.until)]));
-  const live = chain.filter(m => !resting.has(m.id));
-  if (!live.length) {
-    const soonest = Math.min(...chain.map(m => resting.get(m.id) ?? Infinity));
-    throw new QuotaExhaustedError(`Every model for tier "${req.tier}" is resting until its daily reset`,
-      Math.max(60, Math.min(86400, Math.ceil((soonest - Date.now()) / 1000))));
-  }
-  const restModel = (model_id: string, seconds: number, reason: string) => db.from('model_rest').upsert(
-    { model_id, until: new Date(Date.now() + seconds * 1000).toISOString(), reason, updated_at: new Date().toISOString() },
-    { onConflict: 'model_id' });
-
-  const { data: keyRows } = await app.rpc('resolve_key_for_team', { p_team_code: req.teamCode });
-  const key = (keyRows as any[])?.[0];
-  if (!key) throw new PolicyError(`No active Gemini key for team "${req.teamCode}".`);
-  const { data: secret } = await app.rpc('get_key_secret', { p_key_id: key.key_id });
-  if (!secret) throw new PolicyError(`Key ${key.label} has no readable secret.`);
-  // A key from a paid project may only be used when paid use is on and no hard budget is reached (Part I §31).
-  const { data: kp } = await db.from('ai_projects').select('usage_tier').eq('id', key.project_id).maybeSingle();
-  if ((kp as any)?.usage_tier && (kp as any).usage_tier !== 'free') {
-    const { data: blocked } = await app.rpc('paid_call_blocked', { p_book: req.bookId ?? null, p_project: key.project_id, p_provider: 'gemini' });
-    if (blocked) throw new PolicyError(String(blocked));
-  }
-
+  const price = new Map(chain.map(m => [m.id, m]));
   const est = Math.ceil((req.system.length + req.prompt.length) / 4);
-  const { data: wait } = await app.rpc('quota_gate', { p_model: live[0].id, p_est_tokens: est });
-  // First model at its limit: go straight to the next ones instead of waiting, if there are any.
-  let startAt = 0;
-  if (Number(wait) > 0) {
-    if (live.length < 2) throw new QuotaExhaustedError(`Project quota for ${live[0].id} is used up for now.`, Number(wait));
-    startAt = 1;
-  }
 
+  // Part H §24: every routing-eligible project x model, ranked in the database by quality order, health, capacity,
+  // free-before-paid and latency. One key per project (keys in a project share its quota; never switch keys on 429).
+  const { data: candRows, error: candErr } = await app.rpc('gemini_candidates', { p_team: req.teamCode, p_models: chain.map(m => m.id), p_est: est });
+  if (candErr) throw new Error(`Routing failed: ${candErr.message}`);
+  let cands = (candRows ?? []) as any[];
+  if (!cands.length) throw new PolicyError(`No routing-eligible Gemini project has an active key (team "${req.teamCode}").`);
+
+  if (req.bookId) {
+    const { data: book } = await db.from('books').select('privacy_mode').eq('id', req.bookId).single();
+    if (book?.privacy_mode === 'confidential') {
+      cands = cands.filter(c => c.usage_tier && c.usage_tier !== 'free');
+      if (!cands.length) throw new PolicyError('This book is confidential and every eligible Gemini project is on the free tier. ' +
+        'Authorise a paid project, or mark the book as standard in its settings.');
+    }
+  }
+  // Paid projects only when paid use is on and no hard budget is reached (Part I §31); checked once per project.
+  const blockedProject = new Map<string, string | null>();
+  for (const c of cands.filter(c => c.paid)) {
+    if (blockedProject.has(c.project_id)) continue;
+    const { data: blocked } = await app.rpc('paid_call_blocked', { p_book: req.bookId ?? null, p_project: c.project_id, p_provider: 'gemini' });
+    blockedProject.set(c.project_id, blocked ? String(blocked) : null);
+  }
+  const paidBlocks = [...blockedProject.values()].filter(Boolean) as string[];
+  cands = cands.filter(c => !blockedProject.get(c.project_id));
+  if (!cands.length) throw new PolicyError(paidBlocks[0] ?? 'No Gemini option is allowed right now.');
+
+  const restInProject = (project_id: string, model_id: string, seconds: number, reason: string) => db.from('project_model_rest').upsert(
+    { project_id, model_id, until: new Date(Date.now() + seconds * 1000).toISOString(), reason, updated_at: new Date().toISOString() },
+    { onConflict: 'project_id,model_id' });
+  const secrets = new Map<string, string>();
   const promptHash = await sha256(req.system + '\u0000' + req.prompt);
-  const base = { job_id: req.jobId ?? null, book_id: req.bookId ?? null, role_code: req.roleCode, team_code: req.teamCode,
-                 key_id: key.key_id, project_id: key.project_id, prompt_hash: promptHash,
-                 prompt_version: req.promptVersion ?? null };
-  const record = (r: Record<string, unknown>) => db.from('agent_runs').insert({ ...base, ...r });
 
   const body: any = {
     systemInstruction: { parts: [{ text: req.system }] },
@@ -107,23 +91,35 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
 
   const t_all = Date.now();
   let lastMsg = '';
-  let quotaWait = startAt ? Number(wait) : 0;   // set when a model's DAILY free limit is used up and we moved on
-  let busyElsewhere = false;                     // a model was busy/failed (not used up): worth retrying soon
-  for (let mi = startAt; mi < live.length; mi++) {
-    const m = live[mi];
-    if (mi > startAt && Date.now() - t_all > budgetMs) break;         // stay inside the function's time limit
-    if (mi > startAt) {   // known limits (learnt from 429 replies): skip a model whose quota is already used up
-      const { data: w } = await app.rpc('quota_gate', { p_model: m.id, p_est_tokens: est });
-      if (Number(w) > 600) { quotaWait = quotaWait ? Math.min(quotaWait, Number(w)) : Number(w); continue; }
-      if (Number(w) > 0) { busyElsewhere = true; continue; }
+  let quotaWait = 0;          // soonest reset among options whose DAILY allowance is used up
+  let busyWait = 0;           // soonest retry among options that are only busy (per-minute limits, resting briefly)
+  let busyElsewhere = false;  // an option was busy/failed (not used up): worth retrying soon
+  let attempts = 0;
+  const minuteLimited = new Set<string>();   // "project|model" pairs that just answered a per-minute 429
+  for (const c of cands) {
+    if (attempts > 0 && Date.now() - t_all > budgetMs) break;   // stay inside the function's time limit
+    const w = Number(c.wait ?? 0);
+    if (w > 600) { quotaWait = quotaWait ? Math.min(quotaWait, w) : w; continue; }
+    if (w > 0) { busyElsewhere = true; busyWait = busyWait ? Math.min(busyWait, w) : w; continue; }
+    if (minuteLimited.has(`${c.project_id}|${c.model_id}`)) continue;
+    const m = price.get(c.model_id) ?? { id: c.model_id, pin: 0, pout: 0 };
+    let secret = secrets.get(c.key_id);
+    if (!secret) {
+      const { data } = await app.rpc('get_key_secret', { p_key_id: c.key_id });
+      if (!data) { lastMsg = `key ${c.key_label} has no readable secret`; continue; }
+      secret = String(data); secrets.set(c.key_id, secret);
     }
+    const record = (r: Record<string, unknown>) => db.from('agent_runs').insert({
+      job_id: req.jobId ?? null, book_id: req.bookId ?? null, role_code: req.roleCode, team_code: req.teamCode,
+      key_id: c.key_id, project_id: c.project_id, prompt_hash: promptHash, prompt_version: req.promptVersion ?? null, ...r });
+    attempts++;
     const t0 = Date.now();
     let status = 0, json: any = {}, retryAfter = 0;
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(m.id)}:generateContent`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': String(secret) },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': secret },
         body: JSON.stringify({ ...body, generationConfig: { ...body.generationConfig, ...(thinkingFor(m.id) ? { thinkingConfig: thinkingFor(m.id) } : {}) } }),
-        signal: AbortSignal.timeout(mi === startAt ? 60_000 : 35_000),   // later models get less time so more of them can be tried
+        signal: AbortSignal.timeout(attempts === 1 ? 60_000 : 35_000),   // later options get less time so more of them can be tried
       });
       status = res.status; retryAfter = Number(res.headers.get('retry-after')) || 0;
       json = await res.json().catch(() => ({}));
@@ -135,7 +131,7 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
       const u = json?.usageMetadata ?? {};
       const inTok = u.promptTokenCount ?? 0, outTok = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);
       const extra = { reasoning_tokens: u.thoughtsTokenCount ?? null, cached_tokens: u.cachedContentTokenCount ?? null };
-      const cost = (inTok * m.pin + outTok * m.pout) / 1e6;
+      const cost = (inTok * m.pin + outTok * m.pout) / 1e6;   // list-price estimate; real spend counts paid projects only
       if (!text.trim()) {   // blocked or empty reply (e.g. safety filter): never save a blank paragraph
         lastMsg = `empty reply (finish=${json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? 'unknown'})`;
         await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: 'error', http_status: 200, error: lastMsg, ...extra });
@@ -146,35 +142,38 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
       if (req.jsonSchema) { try { JSON.parse(text); } catch { st = 'schema_invalid'; } }
       await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: st, http_status: 200, ...extra,
                      error: st === 'ok' ? null : `finish=${json?.candidates?.[0]?.finishReason}; starts: ${text.slice(0, 150)}` });
-      if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; busyElsewhere = true; if (mi < live.length - 1) continue; throw new Error('Model output was not valid JSON for the role schema.'); }
-      return { text, modelId: m.id, inputTokens: inTok, outputTokens: outTok, costEstimate: cost, keyLabel: key.label };
+      if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; busyElsewhere = true; continue; }
+      return { text, modelId: m.id, inputTokens: inTok, outputTokens: outTok, costEstimate: cost, keyLabel: c.key_label };
     }
     const msg = json?.error?.message ?? `HTTP ${status}`;
     lastMsg = msg;
     if (status === 429) {
       await record({ model_id: m.id, latency_ms, status: 'rate_limited', http_status: 429, error: msg });
       const wait = retryAfter || parseRetry(msg) || 60;
-      // Never switch KEYS on quota: every key in the project shares it. A model's DAILY limit is its own,
-      // so the next model in the chain (with its own allowance in the same project) may still work today.
-      if (isDailyLimit(msg)) await restModel(m.id, wait, 'daily free limit used up');
-      if (isDailyLimit(msg) && mi < live.length - 1) {
+      if (isDailyLimit(msg)) {
+        // This model's daily allowance in THIS project is used up; other models, and other projects, have their own.
+        await restInProject(c.project_id, m.id, wait, 'daily free limit used up');
         quotaWait = quotaWait ? Math.min(quotaWait, wait) : wait;
         continue;
       }
-      // Last model used up, but an earlier one was only busy (timeout/5xx): that one still has allowance today.
-      if (isDailyLimit(msg) && busyElsewhere) throw new QuotaExhaustedError(`Backup models busy; ${m.id} used up for today. Trying again in 2 minutes`, 120);
-      throw new QuotaExhaustedError(`Gemini ${isDailyLimit(msg) ? 'daily free limit' : 'per-minute limit'} reached for ${m.id}`, Math.min(quotaWait ? Math.min(quotaWait, wait) : wait, 86400));
+      // Per-minute limit: the same model may still answer from another eligible project; otherwise hand over to the
+      // backup providers rather than dropping to a weaker Gemini model for a momentary limit.
+      minuteLimited.add(`${c.project_id}|${m.id}`);
+      busyWait = busyWait ? Math.min(busyWait, wait) : wait;
+      if (cands.some(o => o.model_id === m.id && o.project_id !== c.project_id && Number(o.wait ?? 0) === 0)) continue;
+      throw new QuotaExhaustedError(`Gemini per-minute limit reached for ${m.id}`, Math.min(wait, 86400));
     }
     await record({ model_id: m.id, latency_ms, status: 'error', http_status: status || null, error: msg });
-    // 5xx, timeouts and 404 (model retired for this project) move on to the next model; other errors stop.
+    // 5xx, timeouts and 404 (model retired for this project) move on to the next option; other errors stop.
     if (!(status === 0 || status >= 500 || status === 404)) throw new Error(`Gemini call failed (HTTP ${status}): ${msg}`);
-    if (status === 404) await restModel(m.id, 7 * 86400, 'not available to this project');
-    if (status !== 404) busyElsewhere = true;
-    await sleep(1500);   // brief pause, then the next model in the chain
+    if (status === 404) await restInProject(c.project_id, m.id, 7 * 86400, 'not available to this project');
+    else busyElsewhere = true;
+    await sleep(1500);   // brief pause, then the next option
   }
-  // Park until tomorrow ONLY when every model really is used up; if some were just busy, try again soon.
+  if (!attempts && !quotaWait && busyWait) throw new QuotaExhaustedError(`Every Gemini option is busy for now`, Math.max(30, busyWait));
+  // Park until tomorrow ONLY when every option really is used up; if some were just busy, try again soon.
   if (quotaWait && !busyElsewhere) throw new QuotaExhaustedError(`Gemini daily free limits reached for every model in tier "${req.tier}"`, Math.min(quotaWait, 86400));
-  if (quotaWait) throw new QuotaExhaustedError(`Main model used up for today and the backup models are busy; trying again in 2 minutes`, 120);
+  if (quotaWait) throw new QuotaExhaustedError(`Main model used up for today and the other options are busy; trying again in 2 minutes`, Math.max(30, Math.min(120, busyWait || 120)));
   throw new Error(`All models for tier "${req.tier}" are unavailable right now: ${lastMsg}`);
 }
 
@@ -255,8 +254,14 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
       // Free tiers cap tokens per request (Groq free: about 8,000 per minute, counting the reply budget too).
       // A request above the cap can never succeed (HTTP 413), so skip that model instead of wasting a call.
       const cap = Number(cfg.max_request_tokens?.[id] ?? 0);
-      const need = Math.ceil((system.length + req.prompt.length) / 3.5) + Number(payload.max_tokens ?? 0);
-      if (cap && need > cap) { why.push(`${provider}/${model}: request of about ${need} tokens is over its ${cap} limit`); continue; }
+      // Conservative token estimate (Groq's own counts ran 15-25% above chars/3.5). When the prompt fits but the reply
+      // budget does not, shrink the reply budget instead of sending a request that can only fail with HTTP 413.
+      const promptTok = Math.ceil((system.length + req.prompt.length) / 3 * 1.1);
+      if (cap && promptTok + Number(payload.max_tokens ?? 0) > cap) {
+        const room = cap - promptTok - 200;
+        if (room >= 1500) payload.max_tokens = room;
+        else { why.push(`${provider}/${model}: request of about ${promptTok} tokens leaves no room under its ${cap} limit`); continue; }
+      }
       const t1 = Date.now();
       let status = 0, json: any = {}, retryAfter = 0;
       try {
@@ -298,7 +303,18 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
       why.push(`${label}: ${status || 'no answer'}`);
       if (status === 429) {
         const daily = /per day|RPD|TPD|daily|free-models-per-day/i.test(msg);
-        const secs = Math.max(20, retryAfter || parseRetry(msg) || (daily ? 3600 : 60));
+        if (/free-models-per-day/i.test(msg)) {
+          // OpenRouter's free allowance is per ACCOUNT, shared by every free model: rest the whole provider until it
+          // resets (00:00 UTC) instead of asking each free model in turn.
+          const reset = new Date(); reset.setUTCHours(24, 0, 0, 0);
+          const secs = Math.max(60, Math.ceil((reset.getTime() - Date.now()) / 1000));
+          await restModel(`${provider}:*`, secs, 'daily free allowance used up (whole account)');
+          soonest = Math.min(soonest, Date.now() + secs * 1000);
+          break;
+        }
+        // A daily token budget (e.g. Groq TPD) frees up slowly: wait at least 15 minutes, not the few minutes the
+        // provider quotes for one more small request, so a known-exhausted quota is not retried over and over.
+        const secs = Math.max(daily ? 900 : 20, retryAfter || parseRetry(msg) || (daily ? 3600 : 60));
         await restModel(id, secs, daily ? 'daily free limit used up' : 'busy (per-minute limit)');
         soonest = Math.min(soonest, Date.now() + secs * 1000);
         continue;

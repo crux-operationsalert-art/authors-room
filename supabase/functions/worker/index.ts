@@ -121,10 +121,10 @@ function aroundText(n: { before: string[]; after: string[] }, label = 'PARAGRAPH
 }
 // The author's open notes: whole-book directions plus notes on this paragraph.
 async function directions(db: SupabaseClient, bookId: string, blockId?: string) {
-  const [{ data }, { data: bk }] = await Promise.all([
+  const [{ data }, { data: bk }, { data: reg }] = await Promise.all([
     db.from('author_notes').select('scope, note, block_id').eq('book_id', bookId).eq('status', 'open').order('created_at'),
-    db.from('books').select('direction_contract').eq('id', bookId).maybeSingle()]);
-  const { data: reg } = await db.schema('app').rpc('repetition_register', { p_book: bookId });
+    db.from('books').select('direction_contract').eq('id', bookId).maybeSingle(),
+    db.schema('app').rpc('repetition_register', { p_book: bookId })]);
   const list = (data ?? []).filter((n: any) => n.scope === 'book' || (blockId && n.block_id === blockId));
   return contractText((bk as any)?.direction_contract) + String(reg ?? '') + (list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
     `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '');
