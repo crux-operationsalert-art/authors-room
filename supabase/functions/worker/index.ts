@@ -96,7 +96,7 @@ function constitutionText(c: any, reserveEnding = false) {
 async function manuscriptSoFar(db: SupabaseClient, bookId: string, exceptBlock?: string) {
   const { data } = await db.from('manuscript_blocks')
     .select('id, order_key, status, block_versions!manuscript_blocks_current_fk(text)')
-    .eq('book_id', bookId).in('status', ['qc_passed', 'author_approved']).order('order_key');
+    .eq('book_id', bookId).in('status', ['qc_passed', 'ai_approved', 'author_approved']).order('order_key');
   return (data ?? []).filter((b: any) => b.id !== exceptBlock).map((b: any) => b.block_versions?.text ?? '').filter(Boolean);
 }
 
@@ -120,18 +120,36 @@ function aroundText(n: { before: string[]; after: string[] }, label = 'PARAGRAPH
 }
 // The author's open notes: whole-book directions plus notes on this paragraph.
 async function directions(db: SupabaseClient, bookId: string, blockId?: string) {
-  const { data } = await db.from('author_notes').select('scope, note, block_id').eq('book_id', bookId).eq('status', 'open').order('created_at');
+  const [{ data }, { data: bk }] = await Promise.all([
+    db.from('author_notes').select('scope, note, block_id').eq('book_id', bookId).eq('status', 'open').order('created_at'),
+    db.from('books').select('direction_contract').eq('id', bookId).maybeSingle()]);
   const list = (data ?? []).filter((n: any) => n.scope === 'book' || (blockId && n.block_id === blockId));
-  return list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
-    `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '';
+  return contractText((bk as any)?.direction_contract) + (list.length ? `AUTHOR'S DIRECTIONS (highest priority; must be followed):\n${list.map((n: any) =>
+    `- ${n.scope === 'book' ? '(whole book) ' : '(this paragraph) '}${n.note}`).join('\n')}\n\n` : '');
+}
+// The book's Direction Contract: author-approved creative decisions that every agent must honour.
+function contractText(c: any) {
+  if (!c || typeof c !== 'object' || !Object.keys(c).length) return '';
+  const lines = Object.entries(c).map(([k, v]) => {
+    const label = k.replace(/_/g, ' ').toUpperCase();
+    if (Array.isArray(v)) return `${label}:\n${v.map((x: any) => `  - ${typeof x === 'string' ? x : x.decision ?? JSON.stringify(x)}`).join('\n')}`;
+    return `${label}: ${v}`;
+  });
+  return `DIRECTION CONTRACT (approved by the author; overrides general rules; never contradict it):\n${lines.join('\n')}\n\n`;
 }
 
 // Storytelling ground rules for every book (app.settings 'craft_rules', editable without a redeploy).
-async function craftText(db: SupabaseClient) {
+async function craftText(db: SupabaseClient, bookId?: string) {
   const { data } = await db.schema('app').from('settings').select('value').eq('key', 'craft_rules').maybeSingle();
   let rules: string[] = R.DEFAULT_CRAFT;
   try { const j = JSON.parse(String((data as any)?.value ?? '')); if (Array.isArray(j) && j.length) rules = j.map(String); } catch { /* fallback */ }
-  return `STORYTELLING GROUND RULES (apply to every paragraph of every book):\n${rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n\n`;
+  let genre = '';
+  if (bookId) {
+    const { data: c } = await db.from('book_constitutions').select('genre, subgenre').eq('book_id', bookId).order('version', { ascending: false }).limit(1).maybeSingle();
+    genre = [(c as any)?.genre, (c as any)?.subgenre].filter(Boolean).join(' / ');
+  }
+  return `STORYTELLING GROUND RULES (apply to every paragraph of every book):\n${rules.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n\n` +
+    (bookId ? R.genreReaderRules(genre) : '');
 }
 // Where a paragraph sits in the chapter plan: chapter number, total chapters, current beat (by words written so far).
 async function placeInPlan(db: SupabaseClient, bookId: string, unitId: string | null) {
@@ -277,8 +295,9 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
   if (key === 'outline/plan') {
     const ctx = await bookContext(db, job.book_id);
     const prev = await manuscriptSoFar(db, job.book_id);
+    const dirs = await directions(db, job.book_id);
     const r = await generate(db, { ...base, system: R.outline.system, jsonSchema: R.outline.schema, maxOutputTokens: 8000,
-      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nBRIEF:\n${JSON.stringify(ctx.cons!.brief, null, 1)}\n\n` +
+      prompt: `CONSTITUTION:\n${constitutionText(ctx.cons)}\n\nBRIEF:\n${JSON.stringify(ctx.cons!.brief, null, 1)}\n\n` + dirs +
               `BOOK BIBLE:\n${ctx.ents.map((e: any) => `- ${e.type} ${e.name}: ${e.profile?.summary ?? ''}`).join('\n')}\n\n` +
               `ALREADY WRITTEN (${prev.length} paragraphs):\n${prev.slice(0, 6).join('\n\n') || '(nothing yet)'}` });
     const o = parse(r.text);
@@ -358,7 +377,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     // where this paragraph sits: chapter, current beat, whether the ending may be told yet
     const place = await placeInPlan(db, job.book_id, (blk as any)?.unit_id ?? null);
     const chapterText = place.text;
-    const craft = await craftText(db);
+    const craft = await craftText(db, job.book_id);
     const prof = await emotionProfile(db, job, base);
     let task = prev.length ? 'Write the next paragraph.' : 'Write the opening paragraph of the book.';
     if (job.payload.guidance) task += `\nAuthor's guidance: ${job.payload.guidance}`;
@@ -369,6 +388,9 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
               `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` +
               chapterText + craft + experienceText(prof) + authorDirs + aroundText(around) + `TASK:\n${task}` });
     const text = r.text.trim().replace(/^["“]|["”]$/g, '');
+    // Guard: never save a reply that was cut off mid-sentence (51 such versions were found in the audit).
+    if (!/[.!?…'"”’)\]*_—-]$/.test(text) || /\b(and|or|but|the|a|of|to|that|I|which|with)\s*,?$/i.test(text) || text.split(/\s+/).length < 25)
+      throw new Error(`Writer reply looked cut off or too short ("…${text.slice(-40)}"); not saved, retrying.`);
     const { data: vid, error } = await app.rpc('commit_block_version', { p_block_id: blockId, p_text: text,
       p_reason: key === 'paragraph/draft' ? 'first draft' : `revision ${loop}`, p_actor_type: 'agent',
       p_provenance: key === 'paragraph/draft' ? 'ai_generated' : 'ai_edited' });
@@ -392,7 +414,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const { block_id, block_version_id, loop } = job.payload;
     const meta = R.LAYER1[job.role_code];
     const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
-    if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
+    if (cur?.current_version_id !== block_version_id || ['author_approved', 'ai_approved'].includes(cur?.status)) return { skipped: 'stale version' };
     const ctx = await bookContext(db, job.book_id);
     const around = await neighbours(db, job.book_id, block_id);
     const authorDirs = await directions(db, job.book_id, block_id);
@@ -420,7 +442,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
   if (key === 'paragraph/review_panel') {
     const { block_id, block_version_id, loop } = job.payload;
     const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
-    if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
+    if (cur?.current_version_id !== block_version_id || ['author_approved', 'ai_approved'].includes(cur?.status)) return { skipped: 'stale version' };
     const ctx = await bookContext(db, job.book_id);
     const around = await neighbours(db, job.book_id, block_id);
     const authorDirs = await directions(db, job.book_id, block_id);
@@ -428,7 +450,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const prof = await emotionProfile(db, job, base);
     const { data: pb } = await db.from('manuscript_blocks').select('unit_id').eq('id', block_id).single();
     const place = await placeInPlan(db, job.book_id, (pb as any)?.unit_id ?? null);
-    const craft = await craftText(db);
+    const craft = await craftText(db, job.book_id);
     const r = await generate(db, { ...base, system: R.panel.system, jsonSchema: R.panel.schema, temperature: 0.2,
       prompt: `CONSTITUTION:\n${constitutionText(ctx.cons, !place.last)}\n\nVOICE PROFILE:\n${JSON.stringify(ctx.voice?.traits ?? {})}\n\n` +
               `CANON FACTS:\n${ctx.facts.map((f: any) => `- ${f.statement}`).join('\n')}\n\n` + place.text + craft + experienceText(prof) + authorDirs +
@@ -458,7 +480,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
   if (key === 'paragraph/consolidate') {
     const { block_id, block_version_id } = job.payload, loop = Number(job.payload.loop ?? 0);
     const { data: cur } = await db.from('manuscript_blocks').select('current_version_id, status').eq('id', block_id).single();
-    if (cur?.current_version_id !== block_version_id || cur?.status === 'author_approved') return { skipped: 'stale version' };
+    if (cur?.current_version_id !== block_version_id || ['author_approved', 'ai_approved'].includes(cur?.status)) return { skipped: 'stale version' };
     const [{ data: runs }, { data: issues }, { data: v }] = await Promise.all([
       db.from('review_runs').select('role_code, score, summary').eq('block_version_id', block_version_id),
       db.from('editorial_issues').select('id, raised_by, severity, category, issue, evidence, suggested_fix').eq('block_version_id', block_version_id),
@@ -469,7 +491,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const bar = bk?.autopilot ? `THE AUTHOR'S BAR: a paragraph is approved only with an overall score above ${bk.autopilot_threshold}/100. ` +
       `Score honestly: give a score above ${bk.autopilot_threshold} only when nothing worth fixing remains. Your instructions must say exactly what would lift it over the bar.\n\n` : '';
     const { data: rd } = await db.from('reader_emotions').select('felt, match, pull, drift, fix').eq('block_version_id', block_version_id).eq('source', 'panel').maybeSingle();
-    const craft = await craftText(db);
+    const craft = await craftText(db, job.book_id);
     const { data: bp } = await db.from('books').select('emotion_profile').eq('id', job.book_id).single();
     const cap = bk?.autopilot ? Number(bk.autopilot_threshold) : 90;
     const readerCheck = rd ? `READER EMOTION CHECK (a simulated target reader, after reading this paragraph in sequence): felt ${feltText((rd as any).felt)}; ` +
@@ -515,7 +537,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const all = ((rows ?? []) as any[]).filter(b => b.block_versions?.text);
     if (!all.length) return { skipped: 'nothing written yet' };
     const authorDirs = await directions(db, job.book_id);
-    const craft = await craftText(db);
+    const craft = await craftText(db, job.book_id);
     // which chapter each paragraph belongs to, so the readers can judge pacing against the plan
     const { data: units } = await db.from('manuscript_blocks').select('id, unit_id').eq('book_id', job.book_id).neq('status', 'cut');
     const firstUnit = ((units ?? []) as any[]).find(u => u.unit_id)?.unit_id ?? null;
@@ -528,6 +550,7 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     const o = parse(r.text);
     const rework: { n: number; blk: any; felt: any[]; match: number; pull: number | null; drift: string; fix: string }[] = [];
     let sum = 0, cnt = 0;
+    const flagged: number[] = [];
     for (const p of o.paragraphs ?? []) {
       const blk = all[Number(p.paragraph) - 1];
       if (!blk) continue;
@@ -536,7 +559,10 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
       const pull = p.pull == null ? null : pct(p.pull);
       await db.from('reader_emotions').upsert({ book_id: job.book_id, block_id: blk.id, block_version_id: blk.current_version_id,
         source: 'audit', felt, match, pull, drift: p.drift || null, fix: p.fix || null }, { onConflict: 'block_version_id,source' });
-      if ((match < AUDIT_BAR || (pull != null && pull < PULL_BAR)) && p.fix)
+      // Author-approved paragraphs are never reopened by the AI: they are flagged for the author instead.
+      if ((match < AUDIT_BAR || (pull != null && pull < PULL_BAR)) && p.fix && blk.status === 'author_approved')
+        flagged.push(Number(p.paragraph));
+      else if ((match < AUDIT_BAR || (pull != null && pull < PULL_BAR)) && p.fix)
         rework.push({ n: Number(p.paragraph), blk, felt, match, pull, drift: String(p.drift ?? ''), fix: String(p.fix) });
     }
     const standing = String(o.standing_direction ?? '').trim();
@@ -561,8 +587,9 @@ async function runJob(db: SupabaseClient, job: any, role: { team_code: string; d
     await db.from('intake_messages').insert({ book_id: job.book_id, role: 'assistant',
       content: `Reader-emotion audit (${cnt} paragraphs, average match ${avg ?? '—'}/100). ${o.overall ?? ''}\n${o.message ?? ''}` +
                (rework.length ? `\nReworking: ${rework.map(w => `paragraph ${w.n} (feeling ${w.match}${w.pull != null ? `, pull ${w.pull}` : ''})`).join(', ')}.` : '\nNo paragraph needs reworking.') +
+               (flagged.length ? `\nYou approved paragraph${flagged.length > 1 ? 's' : ''} ${flagged.join(', ')} yourself, so the team has not changed ${flagged.length > 1 ? 'them' : 'it'}; readers suggest another look (see the reader notes on ${flagged.length > 1 ? 'each' : 'it'}).` : '') +
                (standing ? `\nFrom now on, for the whole book: ${standing}` : '') });
-    return { paragraphs: cnt, average_match: avg, rework: rework.map(w => w.n), standing: standing || null };
+    return { paragraphs: cnt, average_match: avg, rework: rework.map(w => w.n), flagged_for_author: flagged, standing: standing || null };
   }
 
   if (key === 'paragraph/extract_facts') {

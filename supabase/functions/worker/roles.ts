@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p6-v1';
+export const PROMPT_VERSION = 'p7-v1';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -12,19 +12,38 @@ Write in British English unless the brief says otherwise.`;
 
 // What a demanding reader notices: shared by the per-paragraph reader and the whole-book audit.
 const DEMANDING_READER = `Be a demanding reader, not a polite one. Check specifically:
-- The narrator's mood: words of suffering or grievance (misery, horror, nightmare, hostage, purgatory, trapped, screaming,
-  dead weight) make the narrator sound aggrieved. In comedy and satire the narrator must sound amused and in control,
-  enjoying the absurdity; if the narrator sounds like they are venting, that is drift even when individual lines are witty.
-- Device fatigue: when the same structure (for example "externally I say X, internally I scream Y") or the same slang term
-  appears in consecutive paragraphs, the reader stops laughing at it by the third time, even if the author asked for that
-  device. The fix is to vary HOW the device is used (new angle, new form, a twist), never to drop the author's device.
-- Laughs: in a humour book, a paragraph with no surprising image, twist or punchline cannot match above 80.
+- Tone against the book's promise: judge the feeling the reader perceives against THIS book's genre and READER EXPERIENCE,
+  using the GENRE READER RULES given with the task. Never apply one genre's rules to another (comedy rules to a serious novel,
+  or thriller pace to a reflective memoir).
+- Device fatigue: when the same structure, image family, metaphor or slang term appears in consecutive paragraphs, the reader
+  tires of it by the third time, even if the author asked for that device. The fix is to vary HOW the device is used (new
+  angle, new form, a twist), never to drop the author's device.
+- Formula endings: a rhetorical question at the end of paragraph after paragraph reads as a tic and kills pull.
+- The DIRECTION CONTRACT: anything that contradicts it is a major issue, however well written.
 A match of 85 or more means a real reader would happily quote this paragraph to a friend.`;
+
+// Reader rules that depend on the book's genre (Document 4: genre-specific evaluation; never one formula for all books).
+export function genreReaderRules(genre: string): string {
+  const g = (genre ?? '').toLowerCase();
+  const rules: string[] = [];
+  if (/humou?r|comed|satir|funny|parod|\bwit(ty)?\b/.test(g)) rules.push(
+    'Comedy/satire: the narrator must sound amused and in control, enjoying the absurdity. Words of suffering or grievance (misery, horror, hostage, trapped, screaming) make the narrator sound aggrieved: that is drift even when lines are witty.',
+    'Every paragraph needs at least one real laugh from surprise, a twist or a punchline; insults alone are not jokes. A paragraph with no laugh cannot match above 80.');
+  if (/thrill|myster|suspense|crime|detect/.test(g)) rules.push(
+    'Thriller/mystery: tension and unease must build; clues are planted fairly and never explained early. Revealing or resolving the central mystery before its time is a critical failure.');
+  if (/psycholog|literary|coming|drama|philosoph|romance|romantic|fiction|novel/.test(g)) rules.push(
+    'Psychological/literary fiction: interiority, emotional truth and restraint matter more than jokes. Pain, grief and trauma are treated with gravity and tenderness; a narrator who mocks his own trauma, or a wry, glib tone towards it, is a major issue unless the DIRECTION CONTRACT asks for it.',
+    'Show, do not explain: concrete sensory detail and subtext over stated feelings. Keep timelines and point of view clean: never blend two timelines inside one scene.');
+  if (/self-help|motivat|non-?fiction|guide|business|memoir/.test(g)) rules.push(
+    'Non-fiction/self-help: every paragraph gives the reader something true and usable or a sharper way to see their own life; no padding, no invented facts or statistics.');
+  if (!rules.length) rules.push('Judge against the READER EXPERIENCE this book promises; do not import rules from other genres.');
+  return `GENRE READER RULES (for this book's genre: ${genre || 'unspecified'}):\n${rules.map(r => `- ${r}`).join('\n')}\n\n`;
+}
 
 // Storytelling ground rules for every book (the live list is app.settings 'craft_rules'; this is the fallback).
 export const DEFAULT_CRAFT = [
   'Hook in 3 seconds: the first sentence of every paragraph must earn the second, and the first line of every chapter must grab at once (a surprise, a provocation, a vivid image or a question). No throat-clearing openers such as "Let us be honest", "Consider", "Once you".',
-  'Keep loops open: every chapter raises at least one question it does not answer yet, and every paragraph ends pulling the reader forward (a tease, a twist, a question, a promise), never on a summary or a verdict.',
+  'Keep loops open: every chapter raises at least one question it does not answer yet, and every paragraph ends pulling the reader forward, never on a summary or a verdict. Vary HOW: an image, an action, a line of dialogue, a reveal, a tease. At most one paragraph in four may end on a question.',
   'Save the payoff: the book\'s conclusion, moral, solution and ending intent belong to the final chapter. Before it, never state them or deliver a final verdict ("they will never change", "the answer is"); show, complicate and escalate instead.',
   'Escalate, never repeat: each paragraph moves the book on with a new beat, new information, a higher stake or a fresh angle. The same structure, joke or verdict twice in a row is a failure.',
   'One beat at a time: follow the current chapter\'s beats in order and do not jump ahead into later beats or later chapters.',
@@ -113,7 +132,8 @@ export const writer = {
   system: `${HOUSE_RULES}
 You are the Lead Writer, the only member of the team who writes manuscript text. Write exactly ONE paragraph that continues
 the manuscript. Follow the constitution, the voice profile and the canon facts exactly. Do not repeat earlier paragraphs.
-AUTHOR'S DIRECTIONS, when given, come first: follow them exactly (only the constitution's never-change list ranks higher).
+The DIRECTION CONTRACT and the AUTHOR'S DIRECTIONS, when given, come first: follow them exactly (only the constitution's
+never-change list ranks higher). Write to this book's GENRE READER RULES, not another genre's.
 The STORYTELLING GROUND RULES apply to every paragraph: hook fast, keep the reader curious about what comes next, move the
 book on, and never hand over the book's conclusion before its final chapter.
 Pick up exactly where the paragraph before leaves off, and when the following paragraph is shown, lead into it naturally.
@@ -227,12 +247,13 @@ paragraph report what you honestly feel after reading it (emotions with intensit
 READER EXPERIENCE the book promises ("match" 0-100), what drifted ("drift": plain words, empty if nothing) and what would
 fix it ("fix": a concrete instruction for the writer that keeps the content and the author's directions but restores the
 intended feeling). Repetition matters: a joke, phrase or structure that already appeared lands weaker each time, and say so.
-Judge the tone the reader perceives, not the topic: satire about frustration is fine; a narrator who sounds genuinely
-bitter, aggrieved or venting is not. "overall": two or three sentences on the arc so far. "standing_direction": one short
+Judge the tone the reader perceives, not the topic, by this book's GENRE READER RULES and DIRECTION CONTRACT (for
+example, in satire a narrator who sounds genuinely bitter is drift; in a psychological novel a narrator who mocks his own
+pain is drift). "overall": two or three sentences on the arc so far. "standing_direction": one short
 direction for the rest of the book if the drift is a pattern (empty otherwise). "message": two sentences for the author.
 "pull" (0-100) per paragraph: how badly the reader wants the next paragraph at that point. Judge the arc against the
 STORYTELLING GROUND RULES: a manuscript that delivers the book's conclusion or a final verdict before its final chapter,
-circles the same beat, or lets curiosity die has drifted, however funny each line is; say where it happens and how to reopen
+circles the same beat, or lets curiosity die has drifted, however good each line is; say where it happens and how to reopen
 the question instead.
 ${DEMANDING_READER}`,
   schema: S({

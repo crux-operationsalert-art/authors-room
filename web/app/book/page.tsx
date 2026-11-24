@@ -112,7 +112,8 @@ function Workspace() {
   const chapterOf = (unitId: string | null) => { const u = units.find(x => x.id === unitId); if (!u) return null;
     return u.level === 'chapter' ? u : units.find(x => x.id === u.parent_id) ?? null; };
   const wc = (t?: string) => (t ?? '').trim() ? t!.trim().split(/\s+/).length : 0;
-  const wordsIn = (chId: string) => blocks.filter(b => b.status === 'author_approved' && chapterOf(b.unit_id)?.id === chId)
+  const done = (st: string) => st === 'author_approved' || st === 'ai_approved';
+  const wordsIn = (chId: string) => blocks.filter(b => done(b.status) && chapterOf(b.unit_id)?.id === chId)
     .reduce((s2, b) => s2 + wc(b.block_versions?.text), 0);
   const plannedWords = chapters.reduce((s2, c) => s2 + (c.target_words ?? 0), 0);
   const writtenWords = chapters.reduce((s2, c) => s2 + wordsIn(c.id), 0);
@@ -130,15 +131,15 @@ function Workspace() {
     save(`${book.working_title.replace(/[^\w\- ]+/g, '')} backup ${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2), 'application/json');
   }
   function downloadManuscript() {
-    const approved = blocks.filter(b => b.status === 'author_approved' && b.block_versions);
-    const pending = blocks.filter(b => b.status !== 'author_approved' && b.block_versions);
+    const approved = blocks.filter(b => done(b.status) && b.block_versions);
+    const pending = blocks.filter(b => !done(b.status) && b.block_versions);
     let lastCh = '';
     const body = approved.map(b => { const ch = chapterOf(b.unit_id); let h = '';
       if (ch && ch.id !== lastCh) { lastCh = ch.id; h = `## Chapter ${chapters.indexOf(ch) + 1}: ${ch.title}\n\n`; }
-      return h + b.block_versions!.text; }).join('\n\n');
+      return h + (b.status === 'ai_approved' ? '[AI-approved] ' : '') + b.block_versions!.text; }).join('\n\n');
     const text = `# ${book.working_title}\n\n` + body +
       (pending.length ? `\n\n---\nNot yet approved:\n\n` + pending.map(b => `[${b.status}] ${b.block_versions!.text}`).join('\n\n') : '') +
-      `\n\n---\nAI-use note: paragraphs were drafted by AI (Gemini) and reviewed by AI reviewers; approved by the author.\n`;
+      `\n\n---\nAI-use note: paragraphs were drafted by AI (Gemini) and reviewed by AI reviewers. Paragraphs marked [AI-approved] have not yet been approved by the author.\n`;
     save(`${book.working_title.replace(/[^\w\- ]+/g, '')}.md`, text, 'text/markdown');
   }
 
@@ -149,7 +150,8 @@ function Workspace() {
   const waiting = activeJobs.filter(j => j.status === 'waiting_quota').length;
   const genreDecision = decisions.find(d => d.type === 'genre_direction');
   const consolidations = decisions.filter(d => d.type === 'consolidation');
-  const active = blocks.find(b => !['author_approved', 'cut'].includes(b.status));
+  const active = blocks.find(b => !['author_approved', 'ai_approved', 'cut'].includes(b.status));
+  const awaitingYou = blocks.filter(b => b.status === 'ai_approved').length;
   const flagged = approvals.filter(a => a.via === 'autopilot' && a.note);
   const autoCount = approvals.filter(a => a.via === 'autopilot').length;
   const lastMsg = msgs.at(-1);
@@ -200,7 +202,7 @@ function Workspace() {
           <p style={{ fontSize: 13, color: C.muted, margin: '8px 0 0' }}>
             With autopilot on, a paragraph scoring above {book.autopilot_threshold} is approved straight away. Below that, the Lead Writer
             revises it (up to 3 times); after that the best version is kept and flagged for you to look at later. The team moves through the
-            chapter plan by itself and stops when every chapter reaches its length. {autoCount > 0 && `${autoCount} paragraph${autoCount > 1 ? 's' : ''} approved by autopilot so far.`}
+            chapter plan by itself and stops when every chapter reaches its length. {awaitingYou > 0 && `${awaitingYou} paragraph${awaitingYou > 1 ? 's are' : ' is'} approved by the AI team and waiting for your approval.`}
           </p>
           {flagged.length > 0 && (
             <details style={{ marginTop: 8, fontSize: 14 }}>
@@ -333,15 +335,15 @@ function Workspace() {
                 {ch!.target_words ? <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}> · {wordsIn(ch!.id).toLocaleString('en-IN')} / {ch!.target_words.toLocaleString('en-IN')} words</span> : null}</h3>}
               <div id={`act-block-${b.id}`} style={card}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
-                  <b style={{ fontSize: 13 }}>¶ {n + 1}</b>{flag?.via === 'autopilot' && b.status === 'author_approved' ? null
-                    : book.autopilot && b.status !== 'author_approved' ? (() => {
+                  <b style={{ fontSize: 13 }}>¶ {n + 1}</b>{done(b.status) ? <Status s={b.status} />
+                    : book.autopilot ? (() => {
                         const sc = allJobs.filter(j => j.step === 'consolidate' && j.status === 'done' && j.payload?.block_id === b.id && j.result?.score != null).map(j => Number(j.result.score));
                         return <span style={{ fontSize: 12, fontWeight: 600, color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: '1px 8px' }}>
                           Autopilot is improving it{sc.length ? ` · best so far ${Math.max(...sc)}` : ''} · needs above {book.autopilot_threshold}</span>; })()
                     : <Status s={b.status} />}
                   {v && <span style={{ fontSize: 12, color: C.muted }}>v{v.version_no} · {v.provenance.replace('_', ' ')}</span>}
                   <ParagraphMood profile={book.emotion_profile} reading={latestReading(readings, b.id, b.current_version_id)} />
-                  {flag?.via === 'autopilot' && <span style={{ fontSize: 12, color: flag.note ? C.warn : C.ok }}>{flag.note ? '⚑ Approved by autopilot · review later' : '✓ Approved by autopilot'}</span>}
+                  {flag?.via === 'autopilot' && b.status === 'ai_approved' && flag.note && <span style={{ fontSize: 12, color: C.warn }}>⚑ AI team flagged it for your review</span>}
                   {avg !== null && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>Review score {avg}/100</span>}
                 </div>
                 {flag?.note && <p style={{ fontSize: 13, color: C.warn, margin: '0 0 6px' }}>{flag.note}</p>}
@@ -364,9 +366,9 @@ function Workspace() {
                 {notesList.filter(nn => nn.block_id === b.id && nn.status === 'open').map(nn => (
                   <p key={nn.id} style={{ fontSize: 13, margin: '6px 0 0', paddingLeft: 8, borderLeft: `3px solid ${C.accent}` }}>
                     <b>Your note (being applied):</b> {nn.note}</p>))}
-                {v && (b.status === 'qc_passed' || b.status === 'author_approved') && (
+                {v && (b.status === 'qc_passed' || done(b.status)) && (
                   <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-                    {b.status === 'qc_passed' && <button style={btnPrimary} onClick={async () => {
+                    {(b.status === 'qc_passed' || b.status === 'ai_approved') && <button style={btnPrimary} onClick={async () => {
                       if (cdec) await app().rpc('decide', { p_decision: cdec.id, p_choice: { title: 'Accept this version as it is' } });
                       run(app().rpc('approve_block', { p_block_id: b.id }));
                     }}>Approve paragraph</button>}

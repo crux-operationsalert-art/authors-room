@@ -44,7 +44,7 @@ export function Header({ children }: { children?: ReactNode }) {
 
 const STATUS: Record<string, [string, string]> = {
   planned: ['Planned', C.muted], drafted: ['Drafted', C.warn], in_review: ['Team reviewing', C.warn],
-  revision_requested: ['Being revised', C.warn], qc_passed: ['Passed review — awaiting you', C.accent],
+  revision_requested: ['Being revised', C.warn], qc_passed: ['Passed review — awaiting you', C.accent], ai_approved: ['Approved by the AI team — awaiting you', C.accent],
   author_approved: ['Approved by you', C.ok], reopened: ['Reopened', C.bad], cut: ['Cut', C.muted],
 };
 export function Status({ s }: { s: string }) {
