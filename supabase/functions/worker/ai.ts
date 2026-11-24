@@ -73,6 +73,12 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
   if (!key) throw new PolicyError(`No active Gemini key for team "${req.teamCode}".`);
   const { data: secret } = await app.rpc('get_key_secret', { p_key_id: key.key_id });
   if (!secret) throw new PolicyError(`Key ${key.label} has no readable secret.`);
+  // A key from a paid project may only be used when paid use is on and no hard budget is reached (Part I §31).
+  const { data: kp } = await db.from('ai_projects').select('usage_tier').eq('id', key.project_id).maybeSingle();
+  if ((kp as any)?.usage_tier && (kp as any).usage_tier !== 'free') {
+    const { data: blocked } = await app.rpc('paid_call_blocked', { p_book: req.bookId ?? null, p_project: key.project_id, p_provider: 'gemini' });
+    if (blocked) throw new PolicyError(String(blocked));
+  }
 
   const est = Math.ceil((req.system.length + req.prompt.length) / 4);
   const { data: wait } = await app.rpc('quota_gate', { p_model: live[0].id, p_est_tokens: est });
@@ -106,6 +112,11 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
   for (let mi = startAt; mi < live.length; mi++) {
     const m = live[mi];
     if (mi > startAt && Date.now() - t_all > budgetMs) break;         // stay inside the function's time limit
+    if (mi > startAt) {   // known limits (learnt from 429 replies): skip a model whose quota is already used up
+      const { data: w } = await app.rpc('quota_gate', { p_model: m.id, p_est_tokens: est });
+      if (Number(w) > 600) { quotaWait = quotaWait ? Math.min(quotaWait, Number(w)) : Number(w); continue; }
+      if (Number(w) > 0) { busyElsewhere = true; continue; }
+    }
     const t0 = Date.now();
     let status = 0, json: any = {}, retryAfter = 0;
     try {
@@ -123,16 +134,17 @@ async function generateGemini(db: SupabaseClient, req: GenerateRequest, budgetMs
       const text = (json?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('');
       const u = json?.usageMetadata ?? {};
       const inTok = u.promptTokenCount ?? 0, outTok = (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);
+      const extra = { reasoning_tokens: u.thoughtsTokenCount ?? null, cached_tokens: u.cachedContentTokenCount ?? null };
       const cost = (inTok * m.pin + outTok * m.pout) / 1e6;
       if (!text.trim()) {   // blocked or empty reply (e.g. safety filter): never save a blank paragraph
         lastMsg = `empty reply (finish=${json?.candidates?.[0]?.finishReason ?? json?.promptFeedback?.blockReason ?? 'unknown'})`;
-        await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: 'error', http_status: 200, error: lastMsg });
+        await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: 'error', http_status: 200, error: lastMsg, ...extra });
         busyElsewhere = true;
         continue;
       }
       let st = 'ok';
       if (req.jsonSchema) { try { JSON.parse(text); } catch { st = 'schema_invalid'; } }
-      await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: st, http_status: 200,
+      await record({ model_id: m.id, input_tokens: inTok, output_tokens: outTok, cost_estimate: cost, latency_ms, status: st, http_status: 200, ...extra,
                      error: st === 'ok' ? null : `finish=${json?.candidates?.[0]?.finishReason}; starts: ${text.slice(0, 150)}` });
       if (st === 'schema_invalid') { lastMsg = 'invalid JSON'; busyElsewhere = true; if (mi < live.length - 1) continue; throw new Error('Model output was not valid JSON for the role schema.'); }
       return { text, modelId: m.id, inputTokens: inTok, outputTokens: outTok, costEstimate: cost, keyLabel: key.label };
@@ -265,6 +277,8 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
         let text = String(json?.choices?.[0]?.message?.content ?? '').trim();
         text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
         const inTok = json?.usage?.prompt_tokens ?? 0, outTok = json?.usage?.completion_tokens ?? 0;
+        const extra = { reasoning_tokens: json?.usage?.completion_tokens_details?.reasoning_tokens ?? null,
+                        cached_tokens: json?.usage?.prompt_tokens_details?.cached_tokens ?? null };
         let err: string | null = null;
         if (!text) err = `empty reply (finish=${json?.choices?.[0]?.finish_reason ?? 'unknown'})`;
         else if (req.jsonSchema) {
@@ -274,7 +288,7 @@ async function generateBackup(db: SupabaseClient, req: GenerateRequest, keys: an
             if (missing.length) err = `JSON missing ${missing.join(', ')}`;
           } catch { err = 'invalid JSON'; }
         }
-        await record({ model_id: label, input_tokens: inTok, output_tokens: outTok, cost_estimate: 0, latency_ms,
+        await record({ model_id: label, input_tokens: inTok, output_tokens: outTok, cost_estimate: 0, latency_ms, ...extra,
                        status: err ? (err.startsWith('empty') ? 'error' : 'schema_invalid') : 'ok', http_status: 200, error: err });
         if (err) { why.push(`${label}: ${err}`); continue; }
         return { result: { text, modelId: label, inputTokens: inTok, outputTokens: outTok, costEstimate: 0, keyLabel: key.label } };

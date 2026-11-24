@@ -155,7 +155,10 @@ const errText = (e) => {
   try { t = (r?.content ?? []).map(b => b.text ?? '').join(' ') || (typeof r?.structuredContent === 'string' ? r.structuredContent : JSON.stringify(r?.structuredContent ?? '')); } catch {}
   return String(t || e?.message || '').replace(/\s+/g, ' ').slice(0, 300);
 };
-function showState(html) { const s = $('state'); s.hidden = !html; s.innerHTML = html ?? ''; }
+const LIVE_APP = 'https://crux-operationsalert-art.github.io/authors-room/';
+// Every problem message ends with a way through: the live app shows the same progress on any device.
+function showState(html) { const s = $('state'); s.hidden = !html;
+  s.innerHTML = html ? `${html}<br><a href="${LIVE_APP}" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px;font-weight:600">Open the live app instead →</a>` : ''; }
 
 (async () => {
   const mcp = await claude.use('mcp');

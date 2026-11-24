@@ -36,6 +36,7 @@ Deno.serve(async (req) => {
 
   if (action === 'check_keys' && isAdmin) return json(await checkKeys(db));
   if (action === 'add_key' && isAdmin) return json(await addKey(db, body), 200);
+  if (action === 'discover_models' && isAdmin) return json(await discoverModels(db));
 
   // --- tick: start new jobs only in the first 15 s (one slow call can take ~135 s)
   const started = Date.now(), done: unknown[] = [];
@@ -626,10 +627,37 @@ async function checkKeys(db: SupabaseClient) {
     const models = gem ? (j.models ?? []).map((m: any) => String(m.name).replace('models/', ''))
                        : (j.data ?? []).map((m: any) => String(m.id));
     const note = res.ok ? `valid · checked ${new Date().toISOString().slice(0, 16)}Z` : `invalid: ${j?.error?.message ?? res.status}`;
-    await db.from('ai_keys').update({ notes: note }).eq('id', k.id);
+    await db.from('ai_keys').update({ notes: note, ...(res.ok ? { last_verified_at: new Date().toISOString(), models_available: models.slice(0, 300) } : {}) }).eq('id', k.id);
     out.push({ label: k.label, provider: (k as any).provider, last4: k.key_last4, ok: res.ok, http: res.status, models: res.ok ? models : undefined, error: res.ok ? undefined : j?.error?.message });
   }
   return { keys: out };
+}
+
+// Model discovery, capability map and pricing retrieval (Part H §26). Prices are stored as dated snapshots.
+async function discoverModels(db: SupabaseClient) {
+  const app = db.schema('app'); const out: Record<string, unknown> = {};
+  const or = await fetch('https://openrouter.ai/api/v1/models').then(r => r.json()).catch(() => null);
+  if (or?.data) {
+    const models = (or.data as any[]).map(m => {
+      const pin = Number(m.pricing?.prompt ?? NaN) * 1e6, pout = Number(m.pricing?.completion ?? NaN) * 1e6;
+      return { id: m.id, context: m.context_length ?? null, in: isFinite(pin) ? Math.round(pin * 10000) / 10000 : null,
+               out: isFinite(pout) ? Math.round(pout * 10000) / 10000 : null, free: pin === 0 && pout === 0,
+               caps: { modality: m.architecture?.modality ?? null, params: m.supported_parameters ?? [] } };
+    });
+    const { data } = await app.rpc('upsert_model_catalog', { p_provider: 'openrouter', p_models: models, p_source_url: 'https://openrouter.ai/api/v1/models' });
+    out.openrouter = data;
+  }
+  const { data: gk } = await db.from('ai_keys').select('id').eq('provider', 'groq').eq('status', 'active').limit(1).maybeSingle();
+  if (gk) {
+    const { data: secret } = await app.rpc('get_key_secret', { p_key_id: (gk as any).id });
+    const gr = await fetch('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${secret}` } }).then(r => r.json()).catch(() => null);
+    if (gr?.data) {
+      const models = (gr.data as any[]).filter(m => m.active !== false).map(m => ({ id: m.id, context: m.context_window ?? null, in: null, out: null, free: null, caps: { owned_by: m.owned_by ?? null } }));
+      const { data } = await app.rpc('upsert_model_catalog', { p_provider: 'groq', p_models: models, p_source_url: 'https://api.groq.com/openai/v1/models' });
+      out.groq = data;
+    }
+  }
+  return out;
 }
 
 async function addKey(db: SupabaseClient, body: any) {
