@@ -62,7 +62,7 @@ function Workspace() {
         .eq('book_id', id).order('updated_at', { ascending: false }).limit(40),
       sb.from('agent_runs').select('job_id, role_code, model_id, input_tokens, output_tokens, latency_ms, status, created_at')
         .eq('book_id', id).order('created_at', { ascending: false }).limit(300),
-      sb.from('outline_units').select('id, parent_id, level, order_key, title, purpose, beats, target_words, status').eq('book_id', id).order('order_key'),
+      sb.from('outline_units').select('id, parent_id, level, order_key, title, purpose, beats, target_words, status, author_approved_at').eq('book_id', id).order('order_key'),
       sb.from('approvals').select('subject_id, via, note, created_at').eq('book_id', id).eq('subject_type', 'block'),
       sb.from('author_notes').select('id, block_id, scope, note, status, created_at').eq('book_id', id).order('created_at', { ascending: false }),
       sb.from('reader_emotions').select('block_id, block_version_id, source, felt, match, pull, drift, fix, created_at').eq('book_id', id).order('created_at', { ascending: false }).limit(600),
@@ -181,6 +181,13 @@ function Workspace() {
       </div>
       <ActivityPanel jobs={allJobs} runs={runs} next={next} />
       {cons?.status === 'approved' && <ProgressCard p={progress} />}
+      {book.run_state === 'paused' && (
+        <div style={{ ...card, borderColor: C.warn }}>
+          <b>Paused.</b> {book.paused_reason ?? 'No new work starts until you resume.'}
+          {book.branch_of && <p style={{ fontSize: 13, color: C.muted, margin: '6px 0 0' }}>This is a recovery copy. The original book is untouched.</p>}
+          {!/waiting for your review/.test(book.paused_reason ?? '') &&
+            <div style={{ marginTop: 8 }}><button style={btnPrimary} onClick={() => run(app().rpc('set_book_state', { p_book: id, p_state: 'running' }))}>Resume the team</button></div>}
+        </div>)}
       {blocks.some(b => b.block_versions) && (
         <MoodMeter profile={book.emotion_profile} readings={readings} blocks={blocks.filter(b => b.status !== 'cut')}
           auditRunning={allJobs.some(j => j.workflow === 'emotion' && j.step === 'audit' && ['queued', 'running', 'waiting_quota'].includes(j.status))}
@@ -332,7 +339,11 @@ function Workspace() {
             return (
               <div key={b.id}>
               {firstOfCh && <h3 style={{ margin: '18px 0 8px' }}>Chapter {chapters.indexOf(ch!) + 1}: {ch!.title}
-                {ch!.target_words ? <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}> · {wordsIn(ch!.id).toLocaleString('en-IN')} / {ch!.target_words.toLocaleString('en-IN')} words</span> : null}</h3>}
+                {ch!.target_words ? <span style={{ fontSize: 13, color: C.muted, fontWeight: 400 }}> · {wordsIn(ch!.id).toLocaleString('en-IN')} / {ch!.target_words.toLocaleString('en-IN')} words</span> : null}
+                {ch!.author_approved_at ? <span style={{ fontSize: 13, color: C.ok, fontWeight: 400 }}> · ✓ Chapter approved by you</span>
+                  : ch!.status === 'reviewed' ? <button style={{ ...btnPrimary, marginLeft: 10, fontSize: 13 }}
+                      onClick={() => { if (confirm('Approve every paragraph in this chapter and let the team continue?')) run(app().rpc('approve_chapter', { p_chapter: ch!.id })); }}>
+                      Approve chapter and continue</button> : null}</h3>}
               <div id={`act-block-${b.id}`} style={card}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
                   <b style={{ fontSize: 13 }}>¶ {n + 1}</b>{done(b.status) ? <Status s={b.status} />
