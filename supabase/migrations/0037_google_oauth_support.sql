@@ -1,4 +1,3 @@
--- NOTE: reconstructed from the session record; to be diffed against live pg_get_functiondef before relying on it for a rebuild.
 -- 0037: Google OAuth support. Client credentials and refresh tokens stay in Vault (server side only).
 create table if not exists app.oauth_states (
   state text primary key, author_auth_id uuid not null, created_at timestamptz not null default now()

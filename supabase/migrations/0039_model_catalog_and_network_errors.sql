@@ -1,4 +1,3 @@
--- NOTE: reconstructed from the session record; to be diffed against live pg_get_functiondef before relying on it for a rebuild.
 -- 0039: Part H §26 model discovery, capability map and pricing retrieval for OpenRouter and Groq; Part H §25 network
 -- failures and credential/permission errors as their own classes.
 create table if not exists public.model_catalog (
