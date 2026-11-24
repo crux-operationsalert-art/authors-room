@@ -116,6 +116,8 @@ export default function KeysPage() {
       <p style={{ marginTop: 0, color: '#59636e' }}>
         Quota belongs to the Gemini <b>project</b>, so every key below draws on the same limits. Keys give each team its own
         identity, so you can see who used what and revoke one key without stopping the rest. Refreshes every 15 seconds.
+        This page is for adding, checking and assigning keys; which project each key belongs to, which projects the team may use, and the
+        quota pools are on <a href={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/resources/`}>Resources</a>.
       </p>
       {msg && <p role="status" style={{ background: '#ddf4ff', padding: 8, borderRadius: 6 }}>{msg}</p>}
 

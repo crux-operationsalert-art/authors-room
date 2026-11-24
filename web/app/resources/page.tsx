@@ -31,7 +31,7 @@ export default function Resources() {
       sb.from('quota_events').select('*').order('at', { ascending: false }).limit(15),
       sb.from('provisioning_log').select('*').order('at', { ascending: false }).limit(25)]);
     const firstErr = [s, p, k, q].find(x => x.error)?.error;
-    if (firstErr) setErr(firstErr.message);
+    setErr(firstErr ? firstErr.message : null);
     setStatus(s.data); setProjects(p.data ?? []); setKeys((k.data ?? []) as any[]); setPools((q.data ?? []) as any[]);
     setEvents(e.data ?? []); setLogRows(l.data ?? []);
   }, [sb]);
@@ -53,52 +53,6 @@ export default function Resources() {
       <Header><span style={{ fontSize: 13, color: C.muted }}>AI resources</span></Header>
       {err && <p role="alert" style={{ ...card, borderColor: C.bad, color: C.bad }}>{err}</p>}
       {msg && <p role="status" style={{ ...card, borderColor: C.ok }}>{msg}</p>}
-
-      <div style={card}>
-        <h2 style={{ marginTop: 0 }}>Google account</h2>
-        <p style={{ fontSize: 13, color: C.muted, marginTop: 0 }}>
-          Connecting lets the app list your Google Cloud projects, check which project each key belongs to, and create a project or key when you ask.
-          Extra free projects are recorded but never used to add free quota (Google's terms do not allow getting around usage limits).
-          Paid use needs your explicit authorisation and a budget.
-        </p>
-        {!status?.client_configured ? (
-          <>
-            <h3>Step 1: create a Google sign-in client (once)</h3>
-            <ol style={{ fontSize: 14, lineHeight: 1.6 }}>
-              <li>In Google Cloud Console, pick (or create) a project for this app.</li>
-              <li>APIs &amp; Services → Library: enable <b>Cloud Resource Manager API</b>, <b>Service Usage API</b>, <b>API Keys API</b> and <b>Cloud Billing API</b>.</li>
-              <li>APIs &amp; Services → OAuth consent screen: External, add yourself as a test user.</li>
-              <li>Credentials → Create credentials → OAuth client ID → Web application. Authorised redirect URI:<br />
-                <code style={{ fontSize: 12, wordBreak: 'break-all' }}>{FN_REDIRECT}</code></li>
-              <li>Paste the client ID and secret below. The secret is stored encrypted on the server and never shown again.</li>
-            </ol>
-            <input style={input} placeholder="Client ID (…apps.googleusercontent.com)" value={cid} onChange={e => setCid(e.target.value)} aria-label="Client ID" />
-            <input style={{ ...input, marginTop: 6 }} type="password" placeholder="Client secret" value={csec} onChange={e => setCsec(e.target.value)} aria-label="Client secret" />
-            <button style={{ ...btnPrimary, marginTop: 8 }} disabled={busy || !cid || !csec}
-              onClick={() => run(app().rpc('admin_set_google_client', { p_client_id: cid.trim(), p_client_secret: csec.trim() }), () => { setCsec(''); return 'Sign-in client saved.'; })}>Save sign-in client</button>
-          </>
-        ) : (
-          <>
-            <p style={{ fontSize: 13 }}>Sign-in client: {status.client_id_hint} ✓</p>
-            {google.map(a => (
-              <div key={a.id} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '6px 0' }}>
-                <b>{a.label}</b>
-                <span style={{ fontSize: 12, color: a.oauth_status === 'connected' ? C.ok : C.warn }}>{a.oauth_status}</span>
-                <span style={{ fontSize: 12, color: C.muted }}>last discovery {t(a.last_discovery_at)}</span>
-                {a.oauth_status === 'connected' && <>
-                  <button style={btnPrimary} disabled={busy} onClick={() => run(callGoogle({ action: 'discover', account_id: a.id }),
-                    d => `Found ${d?.projects?.length ?? 0} projects; ${d?.keys_verified ?? 0} of your keys verified with Google; ${d?.keys_not_found ?? 0} not found in this account's projects.`)}>
-                    {busy ? 'Working…' : 'Discover projects and keys'}</button>
-                  <button style={btn} disabled={busy} onClick={() => { if (confirm('Disconnect this Google account? Its projects and keys stay in the list.')) run(callGoogle({ action: 'disconnect', account_id: a.id }), () => 'Disconnected.'); }}>Disconnect</button>
-                </>}
-              </div>))}
-            <button style={{ ...btn, marginTop: 6 }} disabled={busy} onClick={async () => {
-              const { data, error } = await callGoogle({ action: 'start' });
-              if (error) setErr(error.message); else location.href = data.url;
-            }}>{google.length ? 'Connect another Google account' : 'Connect Google account'}</button>
-          </>
-        )}
-      </div>
 
       <div style={{ ...card, overflowX: 'auto' }}>
         <h2 style={{ marginTop: 0 }}>Projects</h2>
@@ -152,7 +106,7 @@ export default function Resources() {
 
       <div style={{ ...card, overflowX: 'auto' }}>
         <h2 style={{ marginTop: 0 }}>Keys</h2>
-        <p style={{ fontSize: 12, color: C.muted, marginTop: 0 }}>Only the last 4 characters and a short fingerprint are ever shown. Keys in the same project share one quota.</p>
+        <p style={{ fontSize: 12, color: C.muted, marginTop: 0 }}>Only the last 4 characters and a short fingerprint are ever shown. Keys in the same project share one quota. To add, check or assign keys to teams, use <a href={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}/keys/`}>AI keys &amp; quota</a>.</p>
         <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
           <thead><tr style={{ textAlign: 'left', color: C.muted }}><th>Key</th><th>Provider</th><th>Project</th><th>Ownership</th><th>In use</th><th>Calls 24h</th><th>Link to project</th></tr></thead>
           <tbody>{keys.map(k => (
@@ -186,6 +140,53 @@ export default function Resources() {
             </tr>))}</tbody>
         </table>
       </div>
+
+      <details style={card} open={google.length > 0}>
+        <summary style={{ cursor: 'pointer' }}><b>Google account connection</b> <span style={{ fontSize: 12, color: C.muted }}>{google.length ? '' : '(not connected: optional, on hold)'}</span></summary>
+        <p style={{ fontSize: 13, color: C.muted, marginTop: 0 }}>
+          Connecting lets the app list your Google Cloud projects, check which project each key belongs to, and create a project or key when you ask.
+          Extra free projects are recorded but never used to add free quota (Google's terms do not allow getting around usage limits).
+          Paid use needs your explicit authorisation and a budget.
+        </p>
+        {!status?.client_configured ? (
+          <>
+            <h3>Step 1: create a Google sign-in client (once)</h3>
+            <ol style={{ fontSize: 14, lineHeight: 1.6 }}>
+              <li>In Google Cloud Console, pick (or create) a project for this app.</li>
+              <li>APIs &amp; Services → Library: enable <b>Cloud Resource Manager API</b>, <b>Service Usage API</b>, <b>API Keys API</b> and <b>Cloud Billing API</b>.</li>
+              <li>APIs &amp; Services → OAuth consent screen: External, add yourself as a test user.</li>
+              <li>Credentials → Create credentials → OAuth client ID → Web application. Authorised redirect URI:<br />
+                <code style={{ fontSize: 12, wordBreak: 'break-all' }}>{FN_REDIRECT}</code></li>
+              <li>Paste the client ID and secret below. The secret is stored encrypted on the server and never shown again.</li>
+            </ol>
+            <input style={input} placeholder="Client ID (…apps.googleusercontent.com)" value={cid} onChange={e => setCid(e.target.value)} aria-label="Client ID" />
+            <input style={{ ...input, marginTop: 6 }} type="password" placeholder="Client secret" value={csec} onChange={e => setCsec(e.target.value)} aria-label="Client secret" />
+            <button style={{ ...btnPrimary, marginTop: 8 }} disabled={busy || !cid || !csec}
+              onClick={() => run(app().rpc('admin_set_google_client', { p_client_id: cid.trim(), p_client_secret: csec.trim() }), () => { setCsec(''); return 'Sign-in client saved.'; })}>Save sign-in client</button>
+          </>
+        ) : (
+          <>
+            <p style={{ fontSize: 13 }}>Sign-in client: {status.client_id_hint} ✓</p>
+            {google.map(a => (
+              <div key={a.id} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', margin: '6px 0' }}>
+                <b>{a.label}</b>
+                <span style={{ fontSize: 12, color: a.oauth_status === 'connected' ? C.ok : C.warn }}>{a.oauth_status}</span>
+                <span style={{ fontSize: 12, color: C.muted }}>last discovery {t(a.last_discovery_at)}</span>
+                {a.oauth_status === 'connected' && <>
+                  <button style={btnPrimary} disabled={busy} onClick={() => run(callGoogle({ action: 'discover', account_id: a.id }),
+                    d => `Found ${d?.projects?.length ?? 0} projects; ${d?.keys_verified ?? 0} of your keys verified with Google; ${d?.keys_not_found ?? 0} not found in this account's projects.`)}>
+                    {busy ? 'Working…' : 'Discover projects and keys'}</button>
+                  <button style={btn} disabled={busy} onClick={() => { if (confirm('Disconnect this Google account? Its projects and keys stay in the list.')) run(callGoogle({ action: 'disconnect', account_id: a.id }), () => 'Disconnected.'); }}>Disconnect</button>
+                </>}
+              </div>))}
+            <button style={{ ...btn, marginTop: 6 }} disabled={busy} onClick={async () => {
+              const { data, error } = await callGoogle({ action: 'start' });
+              if (error) setErr(error.message); else location.href = data.url;
+            }}>{google.length ? 'Connect another Google account' : 'Connect Google account'}</button>
+          </>
+        )}
+      </details>
+
 
       <div style={{ ...card, fontSize: 13 }}>
         <h2 style={{ marginTop: 0 }}>Recent quota events</h2>

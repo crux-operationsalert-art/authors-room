@@ -39,6 +39,7 @@ function Workspace() {
   const [progress, setProgress] = useState<Progress | null>(null);
   const [quality, setQuality] = useState<any>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [pass, setPass] = useState<{ total: number; done: number; current: number | null } | null>(null);
   const [rules, setRules] = useState<string[]>([]);
   const [bookNote, setBookNote] = useState('');
   const [runs, setRuns] = useState<any[]>([]);
@@ -50,7 +51,7 @@ function Workspace() {
 
   const load = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return;
-    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr, cr, qs] = await Promise.all([
+    const [b, m, d, c, e, bl, is, rv, j, aj, ar, ou, ap, an, re, pr, cr, qs, rp] = await Promise.all([
       sb.from('books').select('*').eq('id', id).single(),
       sb.from('intake_messages').select('*').eq('book_id', id).order('created_at'),
       sb.from('decisions').select('*').eq('book_id', id).eq('status', 'pending').order('created_at'),
@@ -71,6 +72,7 @@ function Workspace() {
       app().rpc('book_progress', { p_book: id }),
       app().rpc('craft_rules'),
       app().rpc('quality_scores', { p_book: id }),
+      sb.from('revision_plan_items').select('block_id, status, revision_plans!inner(book_id, status)').eq('revision_plans.book_id', id).eq('revision_plans.status', 'active'),
     ]);
     if (b.error || !b.data) { setLoadErr(b.error?.message ?? 'not found'); return; }
     setLoadErr(null);
@@ -81,6 +83,14 @@ function Workspace() {
     setReadings((re.data ?? []) as Reading[]); if (!pr.error) setProgress(pr.data as Progress);
     if (!cr.error && Array.isArray(cr.data)) setRules(cr.data as string[]);
     if (!qs.error) setQuality(qs.data);
+    // progress of an active revision pass (e.g. the top-down re-audit): paragraph numbers in reading order
+    const items = (rp.data ?? []) as any[];
+    if (items.length) {
+      const order = ((bl.data ?? []) as any[]).filter(x => x.status !== 'cut').map(x => x.id);
+      const act = items.find(x => x.status === 'active');
+      setPass({ total: items.length, done: items.filter(x => x.status === 'done' || x.status === 'skipped').length,
+                current: act ? order.indexOf(act.block_id) + 1 : null });
+    } else setPass(null);
   }, [sb, id]);
 
   useEffect(() => {
@@ -190,6 +200,11 @@ function Workspace() {
       </div>
       <ActivityPanel jobs={allJobs} runs={runs} next={next} />
       {cons?.status === 'approved' && <ProgressCard p={progress} />}
+      {pass && (
+        <p role="status" style={{ ...card, borderColor: C.warn, fontSize: 14 }}>
+          <b>Revision pass in progress:</b> {pass.done} of {pass.total} paragraphs done
+          {pass.current ? `; now reworking paragraph ${pass.current}` : '; next paragraph opens shortly'}. Paragraphs are reworked one at a time in reading order; new paragraphs wait until it finishes.
+        </p>)}
       {book.run_state === 'paused' && (
         <div style={{ ...card, borderColor: C.warn }}>
           <b>Paused.</b> {book.paused_reason ?? 'No new work starts until you resume.'}
