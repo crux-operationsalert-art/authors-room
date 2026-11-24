@@ -6,7 +6,7 @@ import { app, callGoogle, supabaseBrowser } from '@/lib/supabaseBrowser';
 import { btn, btnPrimary, C, card, Header, input, page } from '../ui';
 
 const FN_REDIRECT = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/google`;
-const OWN: Record<string, [string, string]> = { verified_oauth: ['Verified with Google', C.ok], manual: ['Linked by you (not verified)', C.warn], unverified: ['Unverified', C.muted] };
+const OWN: Record<string, [string, string]> = { verified_oauth: ['Verified with Google', C.ok], verified_google_reply: ['Verified (Google named the project)', C.ok], manual: ['Linked by you (not verified)', C.warn], unverified: ['Unverified', C.muted] };
 const t = (s?: string | null) => s ? new Date(s).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
 
 export default function Resources() {
