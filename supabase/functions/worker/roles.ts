@@ -1,6 +1,6 @@
 // Prompts and output schemas for the P2 roles. Versioned so every run records
 // which prompt produced it (agent_runs.prompt_version).
-export const PROMPT_VERSION = 'p9-v1';
+export const PROMPT_VERSION = 'p9-v2';
 
 const S = (props: Record<string, unknown>, required: string[]) =>
   (required.length ? { type: 'object', properties: props, required } : { type: 'object', properties: props });
@@ -19,9 +19,10 @@ const DEMANDING_READER = `Be a demanding reader, not a polite one. Check specifi
   tires of it by the third time, even if the author asked for that device. The fix is to vary HOW the device is used (new
   angle, new form, a twist), never to drop the author's device.
 - Formula endings: a rhetorical question at the end of paragraph after paragraph reads as a tic and kills pull.
-- Repetition across the WHOLE manuscript, not just the paragraph before: anything this paragraph shares with ANY other
-  paragraph shown (earlier or later): a gag, image, anecdote, explanation, restated backstory, a 3+ word phrase or the same
-  sentence pattern, is a major issue; quote it and name the other paragraph's number. The same joke in new words still counts.
+- Repetition across the WHOLE manuscript, not just the paragraph before: anything this paragraph repeats from ANY EARLIER
+  paragraph (a gag, image, anecdote, explanation, restated backstory, a 3+ word phrase or the same sentence pattern) is a major
+  issue; quote it and name the earlier paragraph's number. The same joke in new words still counts. The earlier paragraph owns
+  the material: overlap with a LATER paragraph is fixed when that later paragraph is reworked, so never penalise it here.
 - Continuity of events: referring to an object, place, scene or line of dialogue before the paragraph that introduces it,
   or a timeline that does not follow, is a critical issue.
 - The DIRECTION CONTRACT: anything that contradicts it is a major issue, however well written.
@@ -52,23 +53,23 @@ export function genreRubric(genre: string): string {
   let rows: [string, number][], fails: string[];
   if (/humou?r|comed|satir|funny|parod|\bwit(ty)?\b/.test(g)) {
     rows = [['Real laughs from surprise, twist or punchline', 25], ['Voice: amused, in control, true to the narrator', 15],
-            ['Fidelity to the author\'s spine, analogy and DIRECTION CONTRACT', 15], ['Freshness: nothing (gag, image, phrase, explanation, sentence pattern) repeated from ANY other paragraph', 20],
+            ['Fidelity to the author\'s spine, analogy and DIRECTION CONTRACT', 15], ['Freshness: nothing (gag, image, phrase, explanation, sentence pattern) repeated from any EARLIER paragraph', 20],
             ['Quotable line: one fresh, shareable line earned by the scene', 10], ['Pull: the reader must read on (varied endings)', 10], ['Clarity, rhythm and economy', 5]];
     fails = ['the narrator sounds bitter, aggrieved or venting', 'contradicts the DIRECTION CONTRACT or replaces the author\'s analogy',
-             'repeats a gag, image, explanation or scene already used in another paragraph', 'refers to an event or object before it is introduced',
+             'repeats a gag, image, explanation or scene already used in an earlier paragraph', 'refers to an event or object before it is introduced',
              'mocks people for who they are (caste, religion, gender, disability) rather than for behaviour', 'text is cut off or incomplete'];
   } else if (/thrill|myster|suspense|psycholog|literary|coming|drama|philosoph|romance|romantic|fiction|novel/.test(g)) {
     rows = [['Emotional truth and interiority', 20], ['Mystery control: clues fair, nothing resolved early', 15],
             ['Prose: concrete sensory detail, subtext over statement', 10], ['Continuity: timeline, POV, facts and order of events clean', 15],
-            ['Freshness and progress: moves the story on; no image, phrase or backstory repeated from ANY other paragraph', 15],
+            ['Freshness and progress: moves the story on; no image, phrase or backstory repeated from any EARLIER paragraph', 15],
             ['Fidelity to the DIRECTION CONTRACT and author\'s directions', 10], ['Quotable line: one fresh, resonant line earned by the scene', 5],
             ['Pull: the reader must read on (varied endings)', 10]];
     fails = ['explains or resolves the central mystery', 'mocks or trivialises the protagonist\'s pain or trauma',
-             'repeats an image, scene or backstory already given in another paragraph', 'refers to an event or object before it is introduced',
+             'repeats an image, scene or backstory already given in an earlier paragraph', 'refers to an event or object before it is introduced',
              'merges or confuses the two timelines', 'contradicts the DIRECTION CONTRACT', 'text is cut off or incomplete'];
   } else {
     rows = [['Insight the reader can use', 25], ['Accuracy: no invented facts, statistics or quotations', 20], ['Voice', 10],
-            ['Structure and flow', 10], ['Freshness: no point or example repeated from another paragraph', 10],
+            ['Structure and flow', 10], ['Freshness: no point or example repeated from an earlier paragraph', 10],
             ['Quotable line: one fresh, shareable line', 10], ['Engagement and pull', 10], ['Fidelity to the DIRECTION CONTRACT', 5]];
     fails = ['invents a fact, statistic or quotation', 'contradicts the DIRECTION CONTRACT', 'text is cut off or incomplete'];
   }
@@ -177,8 +178,9 @@ never-change list ranks higher). Write to this book's GENRE READER RULES, not an
 The STORYTELLING GROUND RULES apply to every paragraph: hook fast, keep the reader curious about what comes next, move the
 book on, and never hand over the book's conclusion before its final chapter.
 Pick up exactly where the paragraph before leaves off, and when later paragraphs are shown, lead into the next one naturally.
-Never reuse anything from ANY other paragraph shown, earlier or later: no gag, image, anecdote, explanation, backstory, phrase or
-sentence pattern (for example, do not build every paragraph as "Externally... Internally..."). Do not mention anything before the
+Never reuse anything from an EARLIER paragraph: no gag, image, anecdote, explanation, backstory, phrase or sentence pattern
+(for example, do not build every paragraph as "Externally... Internally..."), and do not add anything a later paragraph
+already carries unless it is this paragraph's assigned job (later paragraphs are reworked after this one). Do not mention anything before the
 paragraph that introduces it. Give the paragraph one fresh line a reader would want to quote, earned by the scene.
 Avoid generic phrasing and clichés. Output only the paragraph text, with no title, notes or quotation marks around it.`,
 };

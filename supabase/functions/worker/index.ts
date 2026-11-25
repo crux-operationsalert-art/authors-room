@@ -117,8 +117,8 @@ async function neighbours(db: SupabaseClient, bookId: string, blockId: string) {
 }
 function aroundText(n: { before: string[]; after: string[] }, label = 'PARAGRAPHS BEFORE THIS ONE') {
   return `${label} (${n.before.length}, last 8 shown):\n${n.before.slice(-8).join('\n\n') || '(none: this opens the book)'}\n\n` +
-    (n.after.length ? `LATER PARAGRAPHS, ALREADY WRITTEN (${n.after.length}; this one must lead naturally into the first, and must not repeat ` +
-      `or anticipate anything in any of them):\n${n.after.slice(0, 15).map((t, k) => `[next ${k + 1}] ${t}`).join('\n\n')}\n\n` : '');
+    (n.after.length ? `LATER PARAGRAPHS, ALREADY WRITTEN (${n.after.length}; this one must lead naturally into the first and must not add ` +
+      `material they already carry; any overlap already in them is fixed when they are reworked, so do not count it against this paragraph):\n${n.after.slice(0, 15).map((t, k) => `[next ${k + 1}] ${t}`).join('\n\n')}\n\n` : '');
 }
 // The author's open notes: whole-book directions plus notes on this paragraph.
 async function directions(db: SupabaseClient, bookId: string, blockId?: string) {
